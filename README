@@ -1,0 +1,8 @@
+## Build
+go build -mod=vendor -o bin/ciphera ./cmd/ciphera
+
+## Generate identity
+./bin/ciphera init -p "test passphrase"
+
+## Print fingerprint
+./bin/ciphera fingerprint -p "test passphrase"

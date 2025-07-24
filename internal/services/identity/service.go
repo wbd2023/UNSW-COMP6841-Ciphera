@@ -17,15 +17,22 @@ func New(s store.IdentityStore) *Service {
 var _ domain.IdentityService = (*Service)(nil)
 
 func (s *Service) Generate(passphrase string) (domain.Identity, string, error) {
-	raw, err := crypto.NewX25519Identity()
+	raw, err := crypto.NewIdentity()
 	if err != nil {
 		return domain.Identity{}, "", err
 	}
-	id := domain.Identity{Private: raw.Private, Public: raw.Public}
+
+	id := domain.Identity{
+		XPriv:  domain.MustX25519Private(raw.XPriv[:]),
+		XPub:   domain.MustX25519Public(raw.XPub[:]),
+		EdPriv: domain.MustEd25519Private(raw.EdPriv),
+		EdPub:  domain.MustEd25519Public(raw.EdPub),
+	}
+
 	if err := s.store.SaveIdentity(id, passphrase); err != nil {
 		return domain.Identity{}, "", err
 	}
-	fp := crypto.Fingerprint(id.Public[:])
+	fp := crypto.Fingerprint(id.XPub.Slice())
 	return id, fp, nil
 }
 
@@ -34,5 +41,5 @@ func (s *Service) Fingerprint(passphrase string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return crypto.Fingerprint(id.Public[:]), nil
+	return crypto.Fingerprint(id.XPub.Slice()), nil
 }

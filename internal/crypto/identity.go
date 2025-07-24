@@ -1,10 +1,10 @@
 package crypto
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -17,27 +17,43 @@ const (
 	NonceBytes = chacha20poly1305.NonceSize
 )
 
+// Identity carries both Diffie-Hellman (X25519) and signature (Ed25519) material.
 type Identity struct {
-	Private [32]byte
-	Public  [32]byte
+	XPriv [32]byte
+	XPub  [32]byte
+
+	EdPriv ed25519.PrivateKey
+	EdPub  ed25519.PublicKey
 }
 
-func NewX25519Identity() (*Identity, error) {
-	var priv [32]byte
-	if _, err := rand.Read(priv[:]); err != nil {
+func NewIdentity() (*Identity, error) {
+	// X25519
+	var xpriv [32]byte
+	if _, err := rand.Read(xpriv[:]); err != nil {
 		return nil, err
 	}
-	priv[0] &= 248
-	priv[31] &= 127
-	priv[31] |= 64
+	xpriv[0] &= 248
+	xpriv[31] &= 127
+	xpriv[31] |= 64
+	var xpub [32]byte
+	curve25519.ScalarBaseMult(&xpub, &xpriv)
 
-	var pub [32]byte
-	curve25519.ScalarBaseMult(&pub, &priv)
-	return &Identity{Private: priv, Public: pub}, nil
+	// Ed25519
+	edpub, edpriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Identity{
+		XPriv:  xpriv,
+		XPub:   xpub,
+		EdPriv: edpriv,
+		EdPub:  edpub,
+	}, nil
 }
 
-func Fingerprint(pub []byte) string {
-	sum := sha256.Sum256(pub)
+func Fingerprint(xPub []byte) string {
+	sum := sha256.Sum256(xPub)
 	return hex.EncodeToString(sum[:])
 }
 
@@ -46,9 +62,6 @@ func DeriveKEK(passphrase string, salt []byte) []byte {
 }
 
 func EncryptSecret(passphrase string, plaintext []byte, salt []byte) (nonce, ciphertext []byte, err error) {
-	if len(salt) != SaltBytes {
-		return nil, nil, errors.New("bad salt size")
-	}
 	kek := DeriveKEK(passphrase, salt)
 	defer Zero(kek)
 

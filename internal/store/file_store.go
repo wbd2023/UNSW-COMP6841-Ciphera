@@ -11,6 +11,7 @@ import (
 
 	"ciphera/internal/crypto"
 	"ciphera/internal/domain"
+	"ciphera/internal/util/memzero"
 )
 
 type FileStore struct {
@@ -122,7 +123,7 @@ func (s *FileStore) LoadIdentity(passphrase string) (domain.Identity, error) {
 		EdPub:  domain.MustEd25519Public(v2.EdPub),
 	}
 
-	crypto.Zero(xPriv)
+	memzero.Zero(xPriv)
 	// edPrivRaw becomes id.EdPriv; do not zero here
 
 	return id, nil

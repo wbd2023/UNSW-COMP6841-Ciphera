@@ -38,3 +38,19 @@ func (c *HTTPClient) Register(bundle domain.PrekeyBundle) error {
 	}
 	return nil
 }
+
+func (c *HTTPClient) FetchPrekey(username string) (domain.PrekeyBundle, error) {
+	var out domain.PrekeyBundle
+	resp, err := c.HTTP.Get(c.Base + "/prekey/" + username)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return out, fmt.Errorf("fetch prekey failed: %s", resp.Status)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return out, err
+	}
+	return out, nil
+}

@@ -10,8 +10,9 @@ import (
 	"ciphera/internal/app"
 	"ciphera/internal/domain"
 	"ciphera/internal/relay"
-	"ciphera/internal/services/identity"
-	"ciphera/internal/services/prekey"
+	identitysvc "ciphera/internal/services/identity"
+	prekeysvc "ciphera/internal/services/prekey"
+	sessionsvc "ciphera/internal/services/session"
 	"ciphera/internal/store"
 )
 
@@ -41,14 +42,21 @@ func Execute() error {
 			}
 
 			fs := store.NewFileStore(home)
-			idsvc := identity.New(fs)
-			pksvc := prekey.New(idsvc, fs, fs)
+			idsvc := identitysvc.New(fs)
+			pksvc := prekeysvc.New(idsvc, fs, fs)
 
 			var rc domain.RelayClient
 			if relayURL != "" {
-				rc = &relay.HTTPClient{Base: relayURL, HTTP: http.DefaultClient}
+				hc := &http.Client{Transport: http.DefaultTransport}
+				httpRelay := relay.NewHTTP(relayURL)
+				httpRelay.HTTP = hc
+				rc = httpRelay
 			}
-			appCtx = app.New(idsvc, pksvc, rc)
+
+			sessStore := store.NewSessionStore(home)
+			sessSvc := sessionsvc.New(idsvc, fs, rc, sessStore)
+
+			appCtx = app.New(idsvc, pksvc, rc, sessSvc)
 			return nil
 		},
 	}
@@ -57,6 +65,11 @@ func Execute() error {
 	root.PersistentFlags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to protect keys")
 	root.PersistentFlags().StringVar(&relayURL, "relay", "", "relay base URL (e.g. http://127.0.0.1:8080)")
 
-	root.AddCommand(initCmd(), fingerprintCmd(), registerCmd())
+	root.AddCommand(
+		initCmd(),
+		fingerprintCmd(),
+		registerCmd(),
+		startSessionCmd(),
+	)
 	return root.Execute()
 }

@@ -2,5 +2,5 @@ package domain
 
 type RelayClient interface {
 	Register(bundle PrekeyBundle) error
-	// TODO: Send, Recv, FetchPrekeyBundle(username string), etc.
+	FetchPrekey(username string) (PrekeyBundle, error)
 }

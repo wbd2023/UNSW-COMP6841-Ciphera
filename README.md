@@ -23,13 +23,56 @@ Ciphera is a command line end to end encrypted chat client plus a tiny HTTP rela
 
 ## Build
 
-### Linux
+You can either use the provided `Makefile` (`make build`) or run `go build` directly.
+
+> The repo vendors dependencies, so keep `-mod=vendor` in your build commands.
+
+### Linux / macOS
 
 ```sh
-go mod vendor
+# From the repo root
+go mod tidy
 go build -mod=vendor -o bin/ciphera ./cmd/ciphera
 go build -mod=vendor -o bin/relay   ./cmd/relay
 ```
+
+### Windows (PowerShell)
+
+```powershell
+# From the repo root
+go mod tidy
+go build -mod=vendor -o bin\ciphera.exe .\cmd\ciphera
+go build -mod=vendor -o bin\relay.exe   .\cmd\relay
+```
+
+### Cross-compiling
+
+You can also build for a different OS and CPU by setting `GOOS` and `GOARCH`. Common values:
+
+* `GOOS`: `linux`, `darwin`, `windows`
+* `GOARCH`: `amd64`, `arm64`
+* (Raspberry Pi etc.) `GOOS=linux` with `GOARCH=arm` and optionally `GOARM=7`
+
+Examples:
+
+```sh
+# Linux AMD64 from any host
+GOOS=linux GOARCH=amd64 go build -mod=vendor -o bin/ciphera-linux-amd64 ./cmd/ciphera
+GOOS=linux GOARCH=amd64 go build -mod=vendor -o bin/relay-linux-amd64   ./cmd/relay
+
+# macOS ARM64 (Apple Silicon) from any host
+GOOS=darwin GOARCH=arm64 go build -mod=vendor -o bin/ciphera-darwin-arm64 ./cmd/ciphera
+GOOS=darwin GOARCH=arm64 go build -mod=vendor -o bin/relay-darwin-arm64   ./cmd/relay
+
+# Windows AMD64 from any host
+GOOS=windows GOARCH=amd64 go build -mod=vendor -o bin/ciphera-windows-amd64.exe ./cmd/ciphera
+GOOS=windows GOARCH=amd64 go build -mod=vendor -o bin/relay-windows-amd64.exe   ./cmd/relay
+
+# Linux ARMv7 (e.g. Pi 3) static build with CGO off
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -mod=vendor -o bin/ciphera-linux-armv7 ./cmd/ciphera
+```
+
+Note: check the Go documentation for more info.
 
 ## Quick start
 

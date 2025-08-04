@@ -15,7 +15,7 @@ PKGS := ./...
 # Tool availability
 HAVE_PKILL := $(shell command -v pkill >/dev/null 2>&1 && echo yes || echo no)
 
-.PHONY: all build clean fmt vet lint tidy test test-e2e relay run-relay stop-relay print-platform
+.PHONY: all build clean fmt vet lint tidy test-go test-bash relay run-relay stop-relay print-platform
 
 all: build
 
@@ -51,9 +51,15 @@ install-lint: ## Install golangci-lint
 tidy: ## go mod tidy
 	$(GO) mod tidy
 
-test: ## Placeholder for unit tests (add as you create *_test.go)
-	@echo "No unit tests yet. Add *_test.go and this will run them."
+test-go: ## Run all Go unit tests (*_test.go)
 	# $(GO) test ./...
+
+test-bash: build ## Run all Bash test scripts
+	set -e; \
+	for f in ./scripts/tests/*.sh; do \
+		echo "Running $$f"; \
+		bash "$$f"; \
+	done
 
 relay: build ## Build only relay
 	@:
@@ -77,6 +83,3 @@ stop-relay: ## Stop background relay
 	else \
 		echo "No relay pid file found"; \
 	fi
-
-test-e2e: build ## Run end-to-end happy-path test
-	./scripts/tests/test0.sh

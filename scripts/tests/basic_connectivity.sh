@@ -78,4 +78,4 @@ grep -q "\[${ALICE_USER}\] hello bob" "${BOB_RECV_OUT}"
 "${CIPHERA_BIN}" recv --home "${ALICE_HOME}" --username "${ALICE_USER}" --relay "${RELAY_URL}" --passphrase "${ALICE_PASS}" | tee "${ALICE_RECV_OUT}"
 grep -q "\[${BOB_USER}\] hi alice" "${ALICE_RECV_OUT}"
 
-echo "[+] E2E test passed"
+echo "[+] E2E basic connectivity test passed"

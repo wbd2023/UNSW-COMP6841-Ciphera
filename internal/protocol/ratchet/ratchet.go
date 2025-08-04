@@ -11,8 +11,8 @@ import (
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
 
+	"ciphera/internal/crypto"
 	"ciphera/internal/domain"
-	"ciphera/internal/util/memzero"
 )
 
 const (
@@ -48,7 +48,7 @@ func InitAsInitiator(root []byte, _ domain.X25519Private, _ domain.X25519Public,
 		return domain.RatchetState{}, err
 	}
 	newRK, sendCK := kdfRK(root, dh[:])
-	memzero.Zero(dh[:])
+	crypto.Wipe(dh[:])
 
 	return domain.RatchetState{
 		RootKey:   newRK,
@@ -86,7 +86,7 @@ func InitAsResponder(root []byte, ourIDPriv domain.X25519Private, _ domain.X2551
 		return domain.RatchetState{}, err
 	}
 	newRK, recvCK := kdfRK(root, dh[:])
-	memzero.Zero(dh[:])
+	crypto.Wipe(dh[:])
 
 	return domain.RatchetState{
 		RootKey:   newRK,
@@ -131,7 +131,7 @@ func Encrypt(st *domain.RatchetState, ad, plaintext []byte) (domain.RatchetHeade
 			return domain.RatchetHeader{}, nil, err
 		}
 		rk2, sendCK := kdfRK(st.RootKey, dh[:])
-		memzero.Zero(dh[:])
+		crypto.Wipe(dh[:])
 
 		st.RootKey = rk2
 		st.DHPriv, st.DHPub = newPriv, newPub
@@ -145,7 +145,7 @@ func Encrypt(st *domain.RatchetState, ad, plaintext []byte) (domain.RatchetHeade
 	h := domain.RatchetHeader{DHPub: st.DHPub.Slice(), PN: st.PN, N: st.Ns}
 
 	ct, err := seal(mk, h, ad, plaintext)
-	memzero.Zero(mk)
+	crypto.Wipe(mk)
 	if err != nil {
 		return domain.RatchetHeader{}, nil, err
 	}
@@ -162,7 +162,7 @@ func Decrypt(st *domain.RatchetState, ad []byte, header domain.RatchetHeader, ci
 		if mk, ok := st.Skipped[keyID]; ok {
 			delete(st.Skipped, keyID)
 			pt, err := open(mk, header, ad, ciphertext)
-			memzero.Zero(mk)
+			crypto.Wipe(mk)
 			if err != nil {
 				return nil, err
 			}
@@ -183,7 +183,7 @@ func Decrypt(st *domain.RatchetState, ad []byte, header domain.RatchetHeader, ci
 			return nil, err
 		}
 		rk2, recvCK := kdfRK(st.RootKey, dh[:])
-		memzero.Zero(dh[:])
+		crypto.Wipe(dh[:])
 
 		var newPriv domain.X25519Private
 		if _, err := rand.Read(newPriv[:]); err != nil {
@@ -205,7 +205,7 @@ func Decrypt(st *domain.RatchetState, ad []byte, header domain.RatchetHeader, ci
 			return nil, err
 		}
 		rk3, sendCK := kdfRK(rk2, dh2[:])
-		memzero.Zero(dh2[:])
+		crypto.Wipe(dh2[:])
 
 		st.PN = st.Ns
 		st.Ns, st.Nr = 0, 0
@@ -220,7 +220,7 @@ func Decrypt(st *domain.RatchetState, ad []byte, header domain.RatchetHeader, ci
 		return nil, err
 	}
 	pt, err := open(mk, header, ad, ciphertext)
-	memzero.Zero(mk)
+	crypto.Wipe(mk)
 	if err != nil {
 		return nil, err
 	}

@@ -8,7 +8,6 @@ import (
 
 	"ciphera/internal/crypto"
 	"ciphera/internal/domain"
-	"ciphera/internal/util/memzero"
 )
 
 // VerifySPK checks the Ed25519 signature over the Signed Prekey.
@@ -67,7 +66,7 @@ func InitiatorRoot(our domain.Identity, bundle domain.PrekeyBundle) (rk []byte, 
 	r := hkdf.New(sha256.New, transcript, nil, []byte("ciphera/x3dh-v1"))
 	rk = make([]byte, 32)
 	_, _ = io.ReadFull(r, rk)
-	memzero.Zero(transcript)
+	crypto.Wipe(transcript)
 
 	return rk, spkID, opkID, ephPub, nil
 }
@@ -105,7 +104,7 @@ func ResponderRoot(my domain.Identity, spkPriv domain.X25519Private, opkPriv *do
 	r := hkdf.New(sha256.New, transcript, nil, []byte("ciphera/x3dh-v1"))
 	rk := make([]byte, 32)
 	_, _ = io.ReadFull(r, rk)
-	memzero.Zero(transcript)
+	crypto.Wipe(transcript)
 
 	return rk, nil
 }

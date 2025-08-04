@@ -1,45 +1,46 @@
 package identity
 
 import (
-	"ciphera/internal/crypto"
-	"ciphera/internal/domain"
-	"ciphera/internal/store"
+    "ciphera/internal/crypto"
+    "ciphera/internal/domain"
 )
 
+// Service manages identity key creation and access using a backing store.
 type Service struct {
-	store store.IdentityStore
+    store domain.IdentityStore
 }
 
-func New(s store.IdentityStore) *Service {
-	return &Service{store: s}
-}
+// New returns an identity service backed by the given store.
+func New(s domain.IdentityStore) *Service { return &Service{store: s} }
 
-var _ domain.IdentityService = (*Service)(nil)
-
+// Generate creates a new identity, saves it encrypted with passphrase,
+// and returns the identity plus a short fingerprint of the X25519 public key.
 func (s *Service) Generate(passphrase string) (domain.Identity, string, error) {
-	raw, err := crypto.NewIdentity()
-	if err != nil {
-		return domain.Identity{}, "", err
-	}
-
-	id := domain.Identity{
-		XPriv:  domain.MustX25519Private(raw.XPriv[:]),
-		XPub:   domain.MustX25519Public(raw.XPub[:]),
-		EdPriv: domain.MustEd25519Private(raw.EdPriv),
-		EdPub:  domain.MustEd25519Public(raw.EdPub),
-	}
-
-	if err := s.store.SaveIdentity(id, passphrase); err != nil {
-		return domain.Identity{}, "", err
-	}
-	fp := crypto.Fingerprint(id.XPub.Slice())
-	return id, fp, nil
+    xpriv, xpub, err := crypto.GenerateX25519()
+    if err != nil {
+        return domain.Identity{}, "", err
+    }
+    edpriv, edpub, err := crypto.GenerateEd25519()
+    if err != nil {
+        return domain.Identity{}, "", err
+    }
+    id := domain.Identity{XPub: xpub, XPriv: xpriv, EdPub: edpub, EdPriv: edpriv}
+    if err := s.store.Save(passphrase, id); err != nil {
+        return domain.Identity{}, "", err
+    }
+    return id, crypto.FingerprintX25519(id.XPub), nil
 }
 
+// LoadIdentity decrypts and returns the local identity.
+func (s *Service) LoadIdentity(passphrase string) (domain.Identity, error) {
+    return s.store.LoadIdentity(passphrase)
+}
+
+// Fingerprint returns a short fingerprint of the local X25519 public key.
 func (s *Service) Fingerprint(passphrase string) (string, error) {
-	id, err := s.store.LoadIdentity(passphrase)
-	if err != nil {
-		return "", err
-	}
-	return crypto.Fingerprint(id.XPub.Slice()), nil
+    id, err := s.store.LoadIdentity(passphrase)
+    if err != nil {
+        return "", err
+    }
+    return crypto.FingerprintX25519(id.XPub), nil
 }

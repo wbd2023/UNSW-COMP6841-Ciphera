@@ -4,22 +4,23 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"ciphera/internal/crypto"
 )
 
 func fingerprintCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "fingerprint",
-		Short: "Show your identity fingerprint",
+		Short: "Print identity fingerprint",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if passphrase == "" {
-				return fmt.Errorf("passphrase required (-p)")
-			}
-			fp, err := appCtx.IDs.Fingerprint(passphrase)
+			id, err := appCtx.Identity.LoadIdentity(passphrase)
 			if err != nil {
 				return err
 			}
-			fmt.Println(fp)
+			fp := crypto.Fingerprint(id.XPub[:])
+			fmt.Printf("Fingerprint: %s\n", fp)
 			return nil
 		},
 	}
+	return cmd
 }

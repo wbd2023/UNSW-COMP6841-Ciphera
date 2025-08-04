@@ -1,97 +1,109 @@
 package prekey
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
+	"fmt"
+	"time"
 
-	"golang.org/x/crypto/curve25519"
-
+	"ciphera/internal/crypto"
 	"ciphera/internal/domain"
-	"ciphera/internal/store"
 )
 
+// Service manages prekey pairs and builds the public bundle.
 type Service struct {
-	ids     domain.IdentityService
-	idStore store.IdentityStore
-	pkStore store.PrekeyStore
+	ids domain.IdentityStore
+	ps  domain.PrekeyStore
+	bs  domain.PrekeyBundleStore
 }
 
-func New(ids domain.IdentityService, idStore store.IdentityStore, pkStore store.PrekeyStore) *Service {
-	return &Service{
-		ids:     ids,
-		idStore: idStore,
-		pkStore: pkStore,
-	}
+func New(ids domain.IdentityStore, ps domain.PrekeyStore, bs domain.PrekeyBundleStore) *Service {
+	return &Service{ids: ids, ps: ps, bs: bs}
 }
 
-var _ domain.PrekeyService = (*Service)(nil)
-
-func (s *Service) GenerateAndStore(passphrase string, nOneTime uint16) (domain.SignedPreKey, []domain.OneTimePreKey, error) {
-	// load identity to sign the SPK
-	id, err := s.idStore.LoadIdentity(passphrase)
+// GenerateAndStore creates a signed-prekey pair and n one-time pairs.
+// It also marks the new signed-prekey as current.
+func (s *Service) GenerateAndStore(passphrase string, n int) (domain.X25519Public, []domain.X25519Public, error) {
+	id, err := s.ids.LoadIdentity(passphrase)
 	if err != nil {
-		return domain.SignedPreKey{}, nil, err
+		return domain.X25519Public{}, nil, err
 	}
 
-	// signed prekey
-	var spkPriv [32]byte
-	if _, err := rand.Read(spkPriv[:]); err != nil {
-		return domain.SignedPreKey{}, nil, err
+	// Signed prekey
+	spkPriv, spkPub, err := crypto.GenerateX25519()
+	if err != nil {
+		return domain.X25519Public{}, nil, err
 	}
-	spkPriv[0] &= 248
-	spkPriv[31] &= 127
-	spkPriv[31] |= 64
-
-	var spkPub [32]byte
-	curve25519.ScalarBaseMult(&spkPub, &spkPriv)
-
-	sig := ed25519.Sign(ed25519.PrivateKey(id.EdPriv.Slice()), spkPub[:])
-
-	spk := domain.SignedPreKey{
-		ID:  1,
-		Key: domain.MustX25519Public(spkPub[:]),
-		Sig: sig,
+	spkID := fmt.Sprintf("spk-%d", time.Now().Unix())
+	sig := crypto.SignEd25519(id.EdPriv, spkPub[:])
+	if err := s.ps.SaveSignedPrekeyPair(spkID, spkPriv, spkPub, sig); err != nil {
+		return domain.X25519Public{}, nil, err
+	}
+	if err := s.ps.SetCurrentSPKID(spkID); err != nil {
+		return domain.X25519Public{}, nil, err
 	}
 
-	// one-time prekeys
-	otks := make([]domain.OneTimePreKey, 0, nOneTime)
-	for i := uint16(0); i < nOneTime; i++ {
-		var priv [32]byte
-		if _, err := rand.Read(priv[:]); err != nil {
-			return domain.SignedPreKey{}, nil, err
+	// One-time prekeys
+	pairs := make([]domain.OneTimePair, 0, n)
+	publics := make([]domain.X25519Public, 0, n)
+	for i := 0; i < n; i++ {
+		priv, pub, err := crypto.GenerateX25519()
+		if err != nil {
+			return domain.X25519Public{}, nil, err
 		}
-		priv[0] &= 248
-		priv[31] &= 127
-		priv[31] |= 64
-		var pub [32]byte
-		curve25519.ScalarBaseMult(&pub, &priv)
-
-		otks = append(otks, domain.OneTimePreKey{
-			ID:  uint32(i + 1),
-			Key: domain.MustX25519Public(pub[:]),
-		})
+		id := fmt.Sprintf("opk-%d-%d", time.Now().Unix(), i)
+		pairs = append(pairs, domain.OneTimePair{ID: id, Priv: priv, Pub: pub})
+		publics = append(publics, pub)
 	}
-
-	if err := s.pkStore.SavePrekeys(spk, otks); err != nil {
-		return domain.SignedPreKey{}, nil, err
+	if err := s.ps.SaveOneTimePairs(pairs); err != nil {
+		return domain.X25519Public{}, nil, err
 	}
-	return spk, otks, nil
+	return spkPub, publics, nil
 }
 
+// LoadBundle builds the public bundle from the current signed-prekey and OPK list,
+// caches it, and returns it.
 func (s *Service) LoadBundle(passphrase, username string) (domain.PrekeyBundle, error) {
-	id, err := s.idStore.LoadIdentity(passphrase)
+	id, err := s.ids.LoadIdentity(passphrase)
 	if err != nil {
 		return domain.PrekeyBundle{}, err
 	}
-	spk, otks, err := s.pkStore.LoadPrekeys()
+
+	spkID, ok, err := s.ps.CurrentSPKID()
 	if err != nil {
 		return domain.PrekeyBundle{}, err
 	}
-	return domain.PrekeyBundle{
-		Username:      username,
-		IdentityXPub:  id.XPub,
-		IdentityEdPub: id.EdPub,
-		SignedPreKey:  spk,
-		OneTimeKeys:   otks,
-	}, nil
+	if !ok {
+		return domain.PrekeyBundle{}, errNoSignedPrekey
+	}
+	_, spkPub, sig, found, err := s.ps.LoadSignedPrekeyPair(spkID)
+	if err != nil {
+		return domain.PrekeyBundle{}, err
+	}
+	if !found {
+		return domain.PrekeyBundle{}, errNoSignedPrekey
+	}
+
+	oneTime, err := s.ps.ListOneTimePublics()
+	if err != nil {
+		return domain.PrekeyBundle{}, err
+	}
+
+	b := domain.PrekeyBundle{
+		Username:        username,
+		IdentityKey:     id.XPub,
+		SignKey:         id.EdPub,
+		SPKID:           spkID,
+		SignedPrekey:    spkPub,
+		SignedPrekeySig: sig,
+		OneTime:         oneTime,
+	}
+	if err := s.bs.SaveBundle(b); err != nil {
+		return domain.PrekeyBundle{}, err
+	}
+	return b, nil
 }
+
+var errNoSignedPrekey = errString("no signed prekey available")
+
+type errString string
+
+func (e errString) Error() string { return string(e) }

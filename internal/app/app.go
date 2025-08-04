@@ -2,18 +2,24 @@ package app
 
 import "ciphera/internal/domain"
 
-type App struct {
-	IDs      domain.IdentityService
-	Prekeys  domain.PrekeyService
-	Relay    domain.RelayClient
-	Sessions domain.SessionService
+// IdentityAPI is the minimal surface the CLI needs for identity tasks.
+type IdentityAPI interface {
+	Generate(passphrase string) (domain.Identity, string, error)
+	LoadIdentity(passphrase string) (domain.Identity, error)
+	Fingerprint(passphrase string) (string, error)
 }
 
-func New(ids domain.IdentityService, prekeys domain.PrekeyService, relay domain.RelayClient, sessions domain.SessionService) *App {
-	return &App{
-		IDs:      ids,
-		Prekeys:  prekeys,
-		Relay:    relay,
-		Sessions: sessions,
-	}
+// PrekeyAPI is the minimal surface the CLI needs for prekey tasks.
+type PrekeyAPI interface {
+	GenerateAndStore(passphrase string, n int) (domain.X25519Public, []domain.X25519Public, error)
+	LoadBundle(passphrase, username string) (domain.PrekeyBundle, error)
+}
+
+// App gathers the services the CLI uses.
+type App struct {
+	IDs      IdentityAPI
+	Prekeys  PrekeyAPI
+	Relay    domain.RelayClient
+	Sessions domain.SessionService
+	Messages domain.MessageService
 }

@@ -23,6 +23,8 @@ Ciphera is a command line end to end encrypted chat client plus a tiny HTTP rela
 
 ## Build
 
+### Linux
+
 ```sh
 go mod vendor
 go build -mod=vendor -o bin/ciphera ./cmd/ciphera

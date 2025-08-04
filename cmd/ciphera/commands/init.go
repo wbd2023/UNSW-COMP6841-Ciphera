@@ -4,22 +4,32 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"ciphera/internal/crypto"
+	"ciphera/internal/domain"
 )
 
 func initCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Generate identity keys and store them securely",
+		Short: "Create or rotate your local identity",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if passphrase == "" {
-				return fmt.Errorf("passphrase required (-p)")
-			}
-			_, fp, err := appCtx.IDs.Generate(passphrase)
+			xpriv, xpub, err := crypto.GenerateX25519()
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Identity created.\nFingerprint: %s\n", fp)
+			edpriv, edpub, err := crypto.GenerateEd25519()
+			if err != nil {
+				return err
+			}
+			id := domain.Identity{XPub: xpub, XPriv: xpriv, EdPub: edpub, EdPriv: edpriv}
+			if err := appCtx.Identity.Save(passphrase, id); err != nil {
+				return err
+			}
+			fmt.Println("Identity created.")
+			fmt.Printf("Fingerprint: %s\n", crypto.Fingerprint(id.XPub[:]))
 			return nil
 		},
 	}
+	return cmd
 }

@@ -1,95 +1,117 @@
 package x3dh
 
 import (
-	"crypto/ed25519"
-	"crypto/hmac"
 	"crypto/sha256"
+	"io"
 
-	"golang.org/x/crypto/curve25519"
+	"golang.org/x/crypto/hkdf"
 
+	"ciphera/internal/crypto"
 	"ciphera/internal/domain"
 	"ciphera/internal/util/memzero"
 )
 
-// InitiatorRootKey derives the root key for the initiator using X3DH.
-func InitiatorRootKey(
-	ourIDPriv domain.X25519Private,
-	ourEphPriv domain.X25519Private,
-	peerIDPub domain.X25519Public,
-	peerSPK domain.X25519Public,
-	peerOPK *domain.X25519Public,
-) ([]byte, error) {
-	dh1, err := dh(ourIDPriv, peerSPK) // DH(IKA, SPKB)
+// VerifySPK checks the Ed25519 signature over the Signed Prekey.
+func VerifySPK(bundle domain.PrekeyBundle) bool {
+	return crypto.VerifyEd25519(bundle.SignKey, bundle.SignedPrekey[:], bundle.SignedPrekeySig)
+}
+
+// InitiatorRoot computes RK and chooses an OPK id (if any).
+// Returns (rk, spkID, opkID, ephPub).
+func InitiatorRoot(our domain.Identity, bundle domain.PrekeyBundle) (rk []byte, spkID, opkID string, ephPub domain.X25519Public, err error) {
+	if !VerifySPK(bundle) {
+		return nil, "", "", ephPub, errBadSPK
+	}
+
+	ephPriv, ephPub0, err := crypto.GenerateX25519()
+	if err != nil {
+		return nil, "", "", ephPub, err
+	}
+	ephPub = ephPub0
+	spkID = bundle.SPKID
+
+	var opk *domain.X25519Public
+	if len(bundle.OneTime) > 0 {
+		opkID = bundle.OneTime[0].ID
+		opk = &bundle.OneTime[0].Pub
+	}
+
+	// DH1: IK_A ⋅ SPK_B
+	dh1, err := crypto.DH(our.XPriv, bundle.SignedPrekey)
+	if err != nil {
+		return nil, "", "", ephPub, err
+	}
+	// DH2: EK_A ⋅ IK_B
+	dh2, err := crypto.DH(ephPriv, bundle.IdentityKey)
+	if err != nil {
+		return nil, "", "", ephPub, err
+	}
+	// DH3: EK_A ⋅ SPK_B
+	dh3, err := crypto.DH(ephPriv, bundle.SignedPrekey)
+	if err != nil {
+		return nil, "", "", ephPub, err
+	}
+
+	transcript := make([]byte, 0, 32*4)
+	transcript = append(transcript, dh1[:]...)
+	transcript = append(transcript, dh2[:]...)
+	transcript = append(transcript, dh3[:]...)
+	if opk != nil {
+		dh4, err := crypto.DH(ephPriv, *opk) // DH4: EK_A ⋅ OPK_B
+		if err != nil {
+			return nil, "", "", ephPub, err
+		}
+		transcript = append(transcript, dh4[:]...)
+	}
+
+	r := hkdf.New(sha256.New, transcript, nil, []byte("ciphera/x3dh-v1"))
+	rk = make([]byte, 32)
+	_, _ = io.ReadFull(r, rk)
+	memzero.Zero(transcript)
+
+	return rk, spkID, opkID, ephPub, nil
+}
+
+// ResponderRoot computes RK from PrekeyMessage using SPK/OPK private keys.
+func ResponderRoot(my domain.Identity, spkPriv domain.X25519Private, opkPriv *domain.X25519Private, pm domain.PrekeyMessage) ([]byte, error) {
+	// DH1: SPK_B ⋅ IK_A
+	dh1, err := crypto.DH(spkPriv, pm.InitiatorIK)
 	if err != nil {
 		return nil, err
 	}
-	dh2, err := dh(ourEphPriv, peerIDPub) // DH(EKA, IKB)
+	// DH2: IK_B ⋅ EK_A
+	dh2, err := crypto.DH(my.XPriv, pm.Ephemeral)
 	if err != nil {
 		return nil, err
 	}
-	dh3, err := dh(ourEphPriv, peerSPK) // DH(EKA, SPKB)
+	// DH3: SPK_B ⋅ EK_A
+	dh3, err := crypto.DH(spkPriv, pm.Ephemeral)
 	if err != nil {
 		return nil, err
 	}
 
-	dhConcat := make([]byte, 0, 32*4)
-	dhConcat = append(dhConcat, dh1[:]...)
-	dhConcat = append(dhConcat, dh2[:]...)
-	dhConcat = append(dhConcat, dh3[:]...)
-
-	if peerOPK != nil {
-		dh4, err := dh(ourEphPriv, *peerOPK) // DH(EKA, OPKB)
+	transcript := make([]byte, 0, 32*4)
+	transcript = append(transcript, dh1[:]...)
+	transcript = append(transcript, dh2[:]...)
+	transcript = append(transcript, dh3[:]...)
+	if opkPriv != nil {
+		dh4, err := crypto.DH(*opkPriv, pm.Ephemeral) // DH4: OPK_B ⋅ EK_A
 		if err != nil {
 			return nil, err
 		}
-		dhConcat = append(dhConcat, dh4[:]...)
+		transcript = append(transcript, dh4[:]...)
 	}
 
-	root := hkdfSHA256(dhConcat, nil, []byte("ciphera-x3dh"), 32)
-	memzero.Zero(dhConcat)
-	return root, nil
+	r := hkdf.New(sha256.New, transcript, nil, []byte("ciphera/x3dh-v1"))
+	rk := make([]byte, 32)
+	_, _ = io.ReadFull(r, rk)
+	memzero.Zero(transcript)
+
+	return rk, nil
 }
 
-// VerifySPK checks the signed prekey signature.
-func VerifySPK(edPub domain.Ed25519Public, spk domain.X25519Public, sig []byte) bool {
-	return ed25519.Verify(edPub.Slice(), spk.Slice(), sig)
-}
+type errString string
 
-func dh(priv domain.X25519Private, pub domain.X25519Public) ([32]byte, error) {
-	res, err := curve25519.X25519(priv.Slice(), pub.Slice())
-	var out [32]byte
-	if err != nil {
-		return out, err
-	}
-	copy(out[:], res)
-	return out, nil
-}
+func (e errString) Error() string { return string(e) }
 
-// hkdfSHA256 implements HKDF (RFC 5869) with SHA-256.
-func hkdfSHA256(ikm, salt, info []byte, outLen int) []byte {
-	if salt == nil {
-		salt = make([]byte, sha256.Size)
-	}
-	prk := hmacSum(salt, ikm)
-	var (
-		t   []byte
-		okm []byte
-		cnt byte = 1
-	)
-	for len(okm) < outLen {
-		h := hmac.New(sha256.New, prk)
-		h.Write(t)
-		h.Write(info)
-		h.Write([]byte{cnt})
-		t = h.Sum(nil)
-		okm = append(okm, t...)
-		cnt++
-	}
-	return okm[:outLen]
-}
-
-func hmacSum(key, data []byte) []byte {
-	h := hmac.New(sha256.New, key)
-	h.Write(data)
-	return h.Sum(nil)
-}
+var errBadSPK = errString("signed prekey verification failed")

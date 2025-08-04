@@ -1,166 +1,268 @@
 package store
 
 import (
-	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
-	"ciphera/internal/crypto"
+	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/scrypt"
+
 	"ciphera/internal/domain"
-	"ciphera/internal/util/memzero"
 )
 
+const (
+	idFile       = "identity.enc"
+	spkPairsFile = "spk_pairs.json" // map[string]spkPair
+	opkPairsFile = "opk_pairs.json" // map[string]opkPair
+	bundleFile   = "bundle_cache.json"
+	metaFile     = "prekey_meta.json" // { "current_spk_id": "spk-..." }
+)
+
+type spkPair struct {
+	Priv [32]byte
+	Pub  [32]byte
+	Sig  []byte
+	At   int64
+}
+
+type opkPair struct {
+	Priv [32]byte
+	Pub  [32]byte
+	At   int64
+}
+
+type prekeyMeta struct {
+	CurrentSPKID string `json:"current_spk_id"`
+}
+
+// FileStore stores identity and prekeys on disk.
 type FileStore struct {
-	home string
+	dir string
+	mu  sync.Mutex
 }
 
-func NewFileStore(home string) *FileStore {
-	return &FileStore{home: home}
-}
+func NewFileStore(dir string) *FileStore { return &FileStore{dir: dir} }
 
-var _ IdentityStore = (*FileStore)(nil)
-var _ PrekeyStore = (*FileStore)(nil)
+// ---------- Identity ----------
 
-func (s *FileStore) idPath() string      { return filepath.Join(s.home, "identity.json") }
-func (s *FileStore) prekeysPath() string { return filepath.Join(s.home, "prekeys.json") }
+func (s *FileStore) Save(passphrase string, id domain.Identity) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-// ---------- Identities ----------
-
-type identityOnDiskV2 struct {
-	Version int `json:"version"` // 2
-	// X25519
-	XPub  []byte `json:"x_pub"`
-	Salt  []byte `json:"salt"`
-	Nonce []byte `json:"nonce"`
-	EncX  []byte `json:"enc_x_priv"`
-	// Ed25519
-	NonceEd []byte `json:"nonce_ed"`
-	EncEd   []byte `json:"enc_ed_priv"` // encrypted ed25519 private key
-	EdPub   []byte `json:"ed_pub"`
-}
-
-func (s *FileStore) SaveIdentity(id domain.Identity, passphrase string) error {
-	if _, err := os.Stat(s.idPath()); err == nil {
-		return domain.ErrIdentityExists
-	}
-
-	// encrypt XPriv
-	salt := make([]byte, crypto.SaltBytes)
-	if _, err := rand.Read(salt); err != nil {
-		return err
-	}
-	// make a throwaway copy because EncryptSecret zeroes the plaintext slice
-	xPlain := append([]byte(nil), id.XPriv.Slice()...)
-	nonceX, encX, err := crypto.EncryptSecret(passphrase, xPlain, salt)
+	raw, err := json.Marshal(id)
 	if err != nil {
 		return err
 	}
-
-	// encrypt EdPriv (reuse same salt for the assignment)
-	edPlain := append([]byte(nil), id.EdPriv.Slice()...)
-	nonceEd, encEd, err := crypto.EncryptSecret(passphrase, edPlain, salt)
+	N, r, p := scryptParamsDefault()
+	blob, err := encrypt(passphrase, raw, N, r, p)
 	if err != nil {
 		return err
 	}
-
-	out := identityOnDiskV2{
-		Version: 2,
-		XPub:    id.XPub.Slice(),
-		Salt:    salt,
-		Nonce:   nonceX,
-		EncX:    encX,
-		EdPub:   id.EdPub.Slice(),
-		NonceEd: nonceEd,
-		EncEd:   encEd,
-	}
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.idPath(), data, 0o600)
+	return os.WriteFile(filepath.Join(s.dir, idFile), blob, 0o600)
 }
 
 func (s *FileStore) LoadIdentity(passphrase string) (domain.Identity, error) {
-	data, err := os.ReadFile(s.idPath())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	blob, err := os.ReadFile(filepath.Join(s.dir, idFile))
 	if err != nil {
 		return domain.Identity{}, err
 	}
-
-	var v2 identityOnDiskV2
-	if err := json.Unmarshal(data, &v2); err != nil {
-		return domain.Identity{}, err
-	}
-	if v2.Version != 2 {
-		return domain.Identity{}, fmt.Errorf("unsupported identity version %d", v2.Version)
-	}
-
-	xPriv, err := crypto.DecryptSecret(passphrase, v2.Salt, v2.Nonce, v2.EncX)
+	raw, err := decrypt(passphrase, blob)
 	if err != nil {
 		return domain.Identity{}, err
 	}
-	edPrivRaw, err := crypto.DecryptSecret(passphrase, v2.Salt, v2.NonceEd, v2.EncEd)
-	if err != nil {
+	var id domain.Identity
+	if err := json.Unmarshal(raw, &id); err != nil {
 		return domain.Identity{}, err
 	}
-	if len(xPriv) != 32 || len(v2.XPub) != 32 {
-		return domain.Identity{}, errors.New("bad x25519 key sizes")
-	}
-	if l := len(edPrivRaw); l != ed25519.PrivateKeySize {
-		return domain.Identity{}, fmt.Errorf("bad ed25519 key size %d", l)
-	}
-	if len(v2.EdPub) != ed25519.PublicKeySize {
-		return domain.Identity{}, errors.New("bad ed25519 public size")
-	}
-
-	id := domain.Identity{
-		XPriv:  domain.MustX25519Private(xPriv),
-		XPub:   domain.MustX25519Public(v2.XPub),
-		EdPriv: domain.MustEd25519Private(edPrivRaw),
-		EdPub:  domain.MustEd25519Public(v2.EdPub),
-	}
-
-	memzero.Zero(xPriv)
-	// edPrivRaw becomes id.EdPriv; do not zero here
-
 	return id, nil
 }
 
-// ---------- Prekeys ----------
+// ---------- Prekey Pairs ----------
 
-type prekeysOnDisk struct {
-	Version   int                    `json:"version"`
-	SignedPre domain.SignedPreKey    `json:"signed_prekey"`
-	OneTime   []domain.OneTimePreKey `json:"one_time_prekeys"`
+func (s *FileStore) SaveSignedPrekeyPair(id string, priv domain.X25519Private, pub domain.X25519Public, sig []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	m := make(map[string]spkPair)
+	_ = readJSON(filepath.Join(s.dir, spkPairsFile), &m)
+
+	m[id] = spkPair{Priv: priv, Pub: pub, Sig: append([]byte(nil), sig...), At: time.Now().Unix()}
+	return writeJSON(filepath.Join(s.dir, spkPairsFile), m, 0o600)
 }
 
-func (s *FileStore) SavePrekeys(spk domain.SignedPreKey, otks []domain.OneTimePreKey) error {
-	out := prekeysOnDisk{
-		Version:   1,
-		SignedPre: spk,
-		OneTime:   otks,
+func (s *FileStore) LoadSignedPrekeyPair(id string) (priv domain.X25519Private, pub domain.X25519Public, sig []byte, ok bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	m := make(map[string]spkPair)
+	if err = readJSON(filepath.Join(s.dir, spkPairsFile), &m); err != nil {
+		return priv, pub, nil, false, err
 	}
-	b, err := json.MarshalIndent(out, "", "  ")
+	p, exists := m[id]
+	if !exists {
+		return priv, pub, nil, false, nil
+	}
+	return p.Priv, p.Pub, append([]byte(nil), p.Sig...), true, nil
+}
+
+func (s *FileStore) SaveOneTimePairs(pairs []domain.OneTimePair) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	m := make(map[string]opkPair)
+	_ = readJSON(filepath.Join(s.dir, opkPairsFile), &m)
+
+	for _, p := range pairs {
+		m[p.ID] = opkPair{Priv: p.Priv, Pub: p.Pub, At: time.Now().Unix()}
+	}
+	return writeJSON(filepath.Join(s.dir, opkPairsFile), m, 0o600)
+}
+
+func (s *FileStore) ConsumeOneTimePair(id string) (priv domain.X25519Private, pub domain.X25519Public, ok bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	m := make(map[string]opkPair)
+	if err = readJSON(filepath.Join(s.dir, opkPairsFile), &m); err != nil {
+		return priv, pub, false, err
+	}
+	p, exists := m[id]
+	if !exists {
+		return priv, pub, false, nil
+	}
+	delete(m, id)
+	if err = writeJSON(filepath.Join(s.dir, opkPairsFile), m, 0o600); err != nil {
+		return priv, pub, false, err
+	}
+	return p.Priv, p.Pub, true, nil
+}
+
+// ListOneTimePublics returns the remaining OPK publics.
+func (s *FileStore) ListOneTimePublics() ([]domain.OneTimePub, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	m := make(map[string]opkPair)
+	if err := readJSON(filepath.Join(s.dir, opkPairsFile), &m); err != nil {
+		return nil, err
+	}
+	out := make([]domain.OneTimePub, 0, len(m))
+	for id, p := range m {
+		out = append(out, domain.OneTimePub{ID: id, Pub: p.Pub})
+	}
+	return out, nil
+}
+
+// ---------- SPK metadata ----------
+
+func (s *FileStore) SetCurrentSPKID(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	meta := prekeyMeta{CurrentSPKID: id}
+	return writeJSON(filepath.Join(s.dir, metaFile), meta, 0o600)
+}
+
+func (s *FileStore) CurrentSPKID() (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var meta prekeyMeta
+	if err := readJSON(filepath.Join(s.dir, metaFile), &meta); err != nil {
+		return "", false, err
+	}
+	if meta.CurrentSPKID == "" {
+		return "", false, nil
+	}
+	return meta.CurrentSPKID, true, nil
+}
+
+// ---------- Bundle cache (public) ----------
+
+func (s *FileStore) SaveBundle(b domain.PrekeyBundle) error {
+	return writeJSON(filepath.Join(s.dir, bundleFile), b, 0o600)
+}
+
+func (s *FileStore) LoadBundle(username string) (domain.PrekeyBundle, bool, error) {
+	var b domain.PrekeyBundle
+	if err := readJSON(filepath.Join(s.dir, bundleFile), &b); err != nil {
+		return domain.PrekeyBundle{}, false, err
+	}
+	if b.Username != username {
+		return domain.PrekeyBundle{}, false, nil
+	}
+	return b, true, nil
+}
+
+// ---------- helpers ----------
+
+func readJSON(path string, v any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
+func writeJSON(path string, v any, mode os.FileMode) error {
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.prekeysPath(), b, 0o600)
+	return os.WriteFile(path, b, mode)
 }
 
-func (s *FileStore) LoadPrekeys() (domain.SignedPreKey, []domain.OneTimePreKey, error) {
-	b, err := os.ReadFile(s.prekeysPath())
+// scrypt envelope (parameters fixed here; tune as needed)
+func scryptParamsDefault() (N, r, p int) { return 1 << 15, 8, 1 }
+
+type envelope struct {
+	Salt []byte
+	AD   []byte
+	CT   []byte
+}
+
+func encrypt(passphrase string, plaintext []byte, N, r, p int) ([]byte, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, err
+	}
+	key, err := scrypt.Key([]byte(passphrase), salt, N, r, p, chacha20poly1305.KeySize)
 	if err != nil {
-		return domain.SignedPreKey{}, nil, err
+		return nil, err
 	}
-	var in prekeysOnDisk
-	if err := json.Unmarshal(b, &in); err != nil {
-		return domain.SignedPreKey{}, nil, err
+	aead, err := chacha20poly1305.New(key)
+	if err != nil {
+		return nil, err
 	}
-	if in.Version != 1 {
-		return domain.SignedPreKey{}, nil, fmt.Errorf("unsupported prekeys version")
+	nonce := make([]byte, aead.NonceSize())
+	ct := aead.Seal(nil, nonce, plaintext, salt)
+	return json.Marshal(envelope{Salt: salt, AD: nil, CT: ct})
+}
+
+func decrypt(passphrase string, blob []byte) ([]byte, error) {
+	var env envelope
+	if err := json.Unmarshal(blob, &env); err != nil {
+		return nil, err
 	}
-	return in.SignedPre, in.OneTime, nil
+	key, err := scrypt.Key([]byte(passphrase), env.Salt, 1<<15, 8, 1, chacha20poly1305.KeySize)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := chacha20poly1305.New(key)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	return aead.Open(nil, nonce, env.CT, env.Salt)
 }

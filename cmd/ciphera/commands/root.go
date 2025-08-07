@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -13,27 +14,31 @@ import (
 )
 
 var (
-	home       string
-	passphrase string
-	username   string
+	// These flags are shared across all commands
+	homeDir    string
 	relayURL   string
+	username   string
+	passphrase string
 
+	// appCtx holds the wired dependencies after PersistentPreRunE
 	appCtx *app.Wire
 )
 
-// Execute wires dependencies and runs the CLI root.
+// Execute initialises the application context and runs the root cobra command.
 func Execute() error {
 	root := &cobra.Command{
 		Use:   "ciphera",
 		Short: "End-to-end encrypted chat CLI",
+		// Before any sub-command runs we need to build out our Wire (dependencies)
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// Default home if not provided.
-			if home == "" {
+			// Default home directory to $HOME/.ciphera if not provided
+			if homeDir == "" {
 				if h, err := os.UserHomeDir(); err == nil {
-					home = filepath.Join(h, ".ciphera")
+					homeDir = filepath.Join(h, ".ciphera")
 				}
 			}
 
+			// Construct an HTTP client with sensible timeouts and connection pooling
 			httpClient := &http.Client{
 				Timeout: 15 * time.Second,
 				Transport: &http.Transport{
@@ -51,22 +56,28 @@ func Execute() error {
 			}
 
 			cfg := app.Config{
-				Home:     home,
+				Home:     homeDir,
 				RelayURL: relayURL,
 				HTTP:     httpClient,
 			}
 			var err error
-			appCtx, err = app.BuildFromConfig(cfg)
-			return err
+			appCtx, err = app.NewWire(cfg)
+			if err != nil {
+				return fmt.Errorf("initialising application: %w", err)
+			}
+			return nil
 		},
 	}
 
-	// Global flags.
-	root.PersistentFlags().StringVar(&home, "home", "", "config directory (default: $HOME/.ciphera)")
-	root.PersistentFlags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock your keys")
-	root.PersistentFlags().StringVar(&relayURL, "relay", "", "relay URL, e.g. http://127.0.0.1:8080")
+	// Global flags
+	root.PersistentFlags().StringVar(&homeDir, "home", "",
+		"config directory (default: $HOME/.ciphera)")
+	root.PersistentFlags().StringVarP(&passphrase, "passphrase", "p", "",
+		"passphrase to unlock your keys")
+	root.PersistentFlags().StringVar(&relayURL, "relay", "",
+		"relay URL, e.g. http://127.0.0.1:8080")
 
-	// Subcommands.
+	// Register sub-commands
 	root.AddCommand(
 		initCmd(),
 		fingerprintCmd(),

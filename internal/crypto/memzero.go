@@ -2,14 +2,13 @@ package crypto
 
 import "runtime"
 
-// Wipe zeroes the provided buffer. This is best-effort and aims to
-// reduce the chance of the compiler eliding the write.
+// Wipe zeroes the provided buffer. Best-effort to prevent compiler elision.
 //
 //go:noinline
 func Wipe(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
-	// Ensure b is considered live until after the loop.
+	// Keep b alive until after the loop.
 	runtime.KeepAlive(&b)
 }

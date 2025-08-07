@@ -1,32 +1,30 @@
 package commands
 
 import (
-    "fmt"
+	"fmt"
 
-    "github.com/spf13/cobra"
+	"github.com/spf13/cobra"
 )
 
-// start-session <peer>: perform X3DH with the peer's bundle and store a session.
+// startSessionCmd performs the X3DH handshake against a peer’s prekey bundle and persists a new
+// session for future messaging.
 func startSessionCmd() *cobra.Command {
-    cmd := &cobra.Command{
-        Use:   "start-session <peer>",
-        Short: "Run X3DH against the peer's prekey bundle and create a session",
-        Args:  cobra.ExactArgs(1),
-        RunE: func(cmd *cobra.Command, args []string) error {
-            if passphrase == "" {
-                return fmt.Errorf("passphrase required (-p)")
-            }
-            if appCtx.Relay == nil {
-                return fmt.Errorf("no relay configured. use --relay")
-            }
-            peer := args[0]
-            sess, err := appCtx.Sessions.StartInitiator(passphrase, peer)
-            if err != nil {
-                return err
-            }
-            fmt.Printf("Session created with %s. RootKey=%x\n", peer, sess.RootKey)
-            return nil
-        },
-    }
-    return cmd
+	return &cobra.Command{
+		Use:   "start-session <peer>",
+		Short: "Establish a secure session with a peer",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			peer := args[0]
+
+			// Initiate handshake and store session state
+			sess, err := appCtx.Sessions.Initiate(passphrase, peer)
+			if err != nil {
+				return fmt.Errorf("starting session with %q: %w", peer, err)
+			}
+
+			// Print the root key so users know it succeeded
+			fmt.Printf("Session created with %s. RootKey=%x\n", peer, sess.RootKey)
+			return nil
+		},
+	}
 }

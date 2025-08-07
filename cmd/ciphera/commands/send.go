@@ -6,30 +6,29 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// send <peer> <message>: encrypt and send a message to <peer>.
+// sendCmd encrypts and sends a message to <peer>, after validating inputs.
 func sendCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "send <peer> <message>",
 		Short: "Encrypt and send a message to a peer",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if passphrase == "" {
-				return fmt.Errorf("passphrase required (-p)")
-			}
-			if appCtx.Relay == nil {
-				return fmt.Errorf("no relay configured. use --relay")
-			}
 			peer := args[0]
 			msg := []byte(args[1])
 
+			// Handles unlocking keys, ratcheting state, HTTP post, etc.
 			if err := appCtx.Messages.Send(passphrase, username, peer, msg); err != nil {
-				return err
+				return fmt.Errorf("sending message to %q: %w", peer, err)
 			}
-			fmt.Println("sent")
+
+			fmt.Println("Message sent")
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&username, "username", "", "your username (same as you registered with)")
+
+	// Username flag is local to this command (others inherit from the root)
+	cmd.Flags().StringVarP(&username, "username", "u", "", "your registered username")
 	_ = cmd.MarkFlagRequired("username")
+
 	return cmd
 }

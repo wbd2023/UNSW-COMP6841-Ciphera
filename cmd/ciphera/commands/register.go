@@ -6,28 +6,30 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// registerCmd generates a signed prekey and a batch of one-time keys, assembles them into a
+// PrekeyBundle, and publishes to the relay.
 func registerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "register [username]",
 		Short: "Publish your prekey bundle to the relay",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			username = args[0]
+			user := args[0]
 
-			// Generate a signed-prekey and a small batch of OPKs.
-			if _, _, err := appCtx.Prekey.GenerateAndStore(passphrase, 10); err != nil {
-				return err
+			// Generate and locally store a signed prekey + N one-time prekeys
+			if _, _, err := appCtx.Prekey.GenerateAndStorePrekeys(passphrase, 10); err != nil {
+				return fmt.Errorf("generating prekeys: %w", err)
 			}
 
-			// Assemble the public bundle and cache it.
-			bundle, err := appCtx.Prekey.LoadBundle(passphrase, username)
+			// Build the public bundle (identity keys, signed prekey, one-time keys)
+			bundle, err := appCtx.Prekey.LoadPrekeyBundle(passphrase, user)
 			if err != nil {
-				return err
+				return fmt.Errorf("loading bundle for %q: %w", user, err)
 			}
 
-			// Publish to relay.
-			if err := appCtx.Relay.Register(bundle); err != nil {
-				return err
+			// Send the bundle off to the relay server
+			if err := appCtx.Relay.RegisterPrekeyBundle(bundle); err != nil {
+				return fmt.Errorf("registering bundle: %w", err)
 			}
 
 			fmt.Println("Registered prekeys with relay")

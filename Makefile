@@ -57,8 +57,10 @@ test-go: ## Run all Go unit tests (*_test.go)
 test-bash: build ## Run all Bash test scripts
 	set -e; \
 	for f in ./scripts/tests/*.sh; do \
-		echo "Running $$f"; \
+		echo ""; \
+		echo "---------- Running $$f ----------"; \
 		bash "$$f"; \
+		echo "--------------------------------------------------"; \
 	done
 
 relay: build ## Build only relay

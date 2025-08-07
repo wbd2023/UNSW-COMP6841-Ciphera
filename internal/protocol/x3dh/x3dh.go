@@ -1,7 +1,9 @@
+// Package x3dh implements the X3DH key-agreement bootstrap used by Double Ratchet.
 package x3dh
 
 import (
 	"crypto/sha256"
+	"errors"
 	"io"
 
 	"golang.org/x/crypto/hkdf"
@@ -10,107 +12,120 @@ import (
 	"ciphera/internal/domain"
 )
 
-// VerifySPK checks the Ed25519 signature over the Signed Prekey.
-func VerifySPK(bundle domain.PrekeyBundle) bool {
-	return crypto.VerifyEd25519(bundle.SignKey, bundle.SignedPrekey[:], bundle.SignedPrekeySig)
-}
+const x3dhLabel = "ciphera/x3dh-v1"
 
-// InitiatorRoot computes RK and chooses an OPK id (if any).
-// Returns (rk, spkID, opkID, ephPub).
-func InitiatorRoot(our domain.Identity, bundle domain.PrekeyBundle) (rk []byte, spkID, opkID string, ephPub domain.X25519Public, err error) {
-	if !VerifySPK(bundle) {
-		return nil, "", "", ephPub, errBadSPK
+var ErrBadSPK = errors.New("signed prekey verification failed")
+
+// InitiatorRoot performs the X3DH handshake as the initiator.
+// Returns (rootKey, usedSPKID, usedOPKID, ephPub, error).
+func InitiatorRoot(
+	our domain.Identity,
+	b domain.PrekeyBundle,
+) (
+	root []byte,
+	spkID string,
+	opkID string,
+	ephPub domain.X25519Public,
+	err error,
+) {
+	if !verifySPK(b) {
+		return nil, "", "", ephPub, ErrBadSPK
 	}
 
-	ephPriv, ephPub0, err := crypto.GenerateX25519()
+	ephPriv, ephPub, err := crypto.GenerateX25519()
 	if err != nil {
 		return nil, "", "", ephPub, err
 	}
-	ephPub = ephPub0
-	spkID = bundle.SPKID
+	spkID = b.SPKID
 
 	var opk *domain.X25519Public
-	if len(bundle.OneTime) > 0 {
-		opkID = bundle.OneTime[0].ID
-		opk = &bundle.OneTime[0].Pub
+	if len(b.OneTime) > 0 {
+		opkID = b.OneTime[0].ID
+		opk = &b.OneTime[0].Pub
 	}
 
-	// DH1: IK_A ⋅ SPK_B
-	dh1, err := crypto.DH(our.XPriv, bundle.SignedPrekey)
+	dh1, err := crypto.DH(our.XPriv, b.SignedPrekey)
 	if err != nil {
 		return nil, "", "", ephPub, err
 	}
-	// DH2: EK_A ⋅ IK_B
-	dh2, err := crypto.DH(ephPriv, bundle.IdentityKey)
+	dh2, err := crypto.DH(ephPriv, b.IdentityKey)
 	if err != nil {
 		return nil, "", "", ephPub, err
 	}
-	// DH3: EK_A ⋅ SPK_B
-	dh3, err := crypto.DH(ephPriv, bundle.SignedPrekey)
+	dh3, err := crypto.DH(ephPriv, b.SignedPrekey)
 	if err != nil {
 		return nil, "", "", ephPub, err
 	}
 
-	transcript := make([]byte, 0, 32*4)
-	transcript = append(transcript, dh1[:]...)
-	transcript = append(transcript, dh2[:]...)
-	transcript = append(transcript, dh3[:]...)
 	if opk != nil {
-		dh4, err := crypto.DH(ephPriv, *opk) // DH4: EK_A ⋅ OPK_B
-		if err != nil {
-			return nil, "", "", ephPub, err
+		dh4, derr := crypto.DH(ephPriv, *opk)
+		if derr != nil {
+			return nil, "", "", ephPub, derr
 		}
-		transcript = append(transcript, dh4[:]...)
+		root, err = deriveRootFromShared(dh1, dh2, dh3, dh4)
+	} else {
+		root, err = deriveRootFromShared(dh1, dh2, dh3)
 	}
-
-	r := hkdf.New(sha256.New, transcript, nil, []byte("ciphera/x3dh-v1"))
-	rk = make([]byte, 32)
-	_, _ = io.ReadFull(r, rk)
-	crypto.Wipe(transcript)
-
-	return rk, spkID, opkID, ephPub, nil
+	return root, spkID, opkID, ephPub, err
 }
 
-// ResponderRoot computes RK from PrekeyMessage using SPK/OPK private keys.
-func ResponderRoot(my domain.Identity, spkPriv domain.X25519Private, opkPriv *domain.X25519Private, pm domain.PrekeyMessage) ([]byte, error) {
-	// DH1: SPK_B ⋅ IK_A
+// ResponderRoot performs the X3DH handshake as the responder.
+func ResponderRoot(
+	my domain.Identity,
+	spkPriv domain.X25519Private,
+	opkPriv *domain.X25519Private,
+	pm domain.PrekeyMessage,
+) (root []byte, err error) {
 	dh1, err := crypto.DH(spkPriv, pm.InitiatorIK)
 	if err != nil {
 		return nil, err
 	}
-	// DH2: IK_B ⋅ EK_A
 	dh2, err := crypto.DH(my.XPriv, pm.Ephemeral)
 	if err != nil {
 		return nil, err
 	}
-	// DH3: SPK_B ⋅ EK_A
 	dh3, err := crypto.DH(spkPriv, pm.Ephemeral)
 	if err != nil {
 		return nil, err
 	}
 
-	transcript := make([]byte, 0, 32*4)
-	transcript = append(transcript, dh1[:]...)
-	transcript = append(transcript, dh2[:]...)
-	transcript = append(transcript, dh3[:]...)
 	if opkPriv != nil {
-		dh4, err := crypto.DH(*opkPriv, pm.Ephemeral) // DH4: OPK_B ⋅ EK_A
-		if err != nil {
-			return nil, err
+		dh4, derr := crypto.DH(*opkPriv, pm.Ephemeral)
+		if derr != nil {
+			return nil, derr
 		}
-		transcript = append(transcript, dh4[:]...)
+		root, err = deriveRootFromShared(dh1, dh2, dh3, dh4)
+	} else {
+		root, err = deriveRootFromShared(dh1, dh2, dh3)
 	}
-
-	r := hkdf.New(sha256.New, transcript, nil, []byte("ciphera/x3dh-v1"))
-	rk := make([]byte, 32)
-	_, _ = io.ReadFull(r, rk)
-	crypto.Wipe(transcript)
-
-	return rk, nil
+	return root, err
 }
 
-type errString string
+// --- Helpers ---
 
-func (e errString) Error() string { return string(e) }
+// verifySPK checks that bundle.SignedPrekey was signed by bundle.SignKey.
+func verifySPK(b domain.PrekeyBundle) bool {
+	return crypto.VerifyEd25519(
+		b.SignKey,
+		b.SignedPrekey[:],
+		b.SignedPrekeySig,
+	)
+}
 
-var errBadSPK = errString("signed prekey verification failed")
+// deriveRootFromShared concatenates the DH outputs and runs HKDF to produce a 32-byte root key.
+// Uses x3dhLabel internally.
+func deriveRootFromShared(dhs ...[32]byte) ([]byte, error) {
+	transcript := make([]byte, 0, len(dhs)*32)
+	for _, dh := range dhs {
+		transcript = append(transcript, dh[:]...)
+	}
+
+	hk := hkdf.New(sha256.New, transcript, nil, []byte(x3dhLabel))
+	root := make([]byte, 32)
+	if _, err := io.ReadFull(hk, root); err != nil {
+		return nil, err
+	}
+
+	crypto.Wipe(transcript)
+	return root, nil
+}

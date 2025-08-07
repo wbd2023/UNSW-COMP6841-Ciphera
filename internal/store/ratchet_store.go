@@ -7,32 +7,38 @@ import (
 	"ciphera/internal/domain"
 )
 
-const convFile = "conversations.json"
+const convFilename = "conversations.json"
 
+// RatchetFileStore persists per-peer Double-Ratchet state to disk.
 type RatchetFileStore struct {
 	dir string
 	mu  sync.Mutex
 }
 
-func NewRatchetFileStore(dir string) *RatchetFileStore { return &RatchetFileStore{dir: dir} }
+// NewRatchetFileStore returns a RatchetFileStore rooted at dir.
+func NewRatchetFileStore(dir string) *RatchetFileStore {
+	return &RatchetFileStore{dir: dir}
+}
 
-func (s *RatchetFileStore) Save(conv domain.Conversation) error {
+// SaveConversation writes the Conversation for peer.
+func (s *RatchetFileStore) SaveConversation(peer string, conv domain.Conversation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	path := filepath.Join(s.dir, convFile)
-	m := make(map[string]domain.Conversation)
+	path := filepath.Join(s.dir, convFilename)
+	m := map[string]domain.Conversation{}
 	_ = readJSON(path, &m)
-	m[conv.Peer] = conv
+	m[peer] = conv
 	return writeJSON(path, m, 0o600)
 }
 
-func (s *RatchetFileStore) Load(peer string) (domain.Conversation, bool, error) {
+// LoadConversation retrieves the Conversation for peer.
+func (s *RatchetFileStore) LoadConversation(peer string) (domain.Conversation, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	path := filepath.Join(s.dir, convFile)
-	m := make(map[string]domain.Conversation)
+	path := filepath.Join(s.dir, convFilename)
+	m := map[string]domain.Conversation{}
 	if err := readJSON(path, &m); err != nil {
 		return domain.Conversation{}, false, err
 	}

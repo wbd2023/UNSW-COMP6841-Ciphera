@@ -15,18 +15,24 @@ type Service struct {
 	store domain.SessionStore
 }
 
-func New(ids domain.IdentityStore, pks domain.PrekeyBundleStore, relay domain.RelayClient, store domain.SessionStore) *Service {
+// New constructs a Session Service with the given stores and relay client.
+func New(
+	ids domain.IdentityStore,
+	pks domain.PrekeyBundleStore,
+	relay domain.RelayClient,
+	store domain.SessionStore,
+) *Service {
 	return &Service{ids: ids, pks: pks, relay: relay, store: store}
 }
 
-// StartInitiator runs X3DH against the peer's bundle and stores a session.
-// Also records initiator's ephemeral and SPK/OPK IDs for a matching PrekeyMessage in first message.
-func (s *Service) StartInitiator(passphrase, peer string) (domain.Session, error) {
+// Initiate runs X3DH against the peer's bundle and stores the resulting session.
+func (s *Service) Initiate(passphrase, peer string) (domain.Session, error) {
 	id, err := s.ids.LoadIdentity(passphrase)
 	if err != nil {
 		return domain.Session{}, err
 	}
-	bundle, err := s.relay.FetchPrekey(peer)
+
+	bundle, err := s.relay.FetchPrekeyBundle(peer)
 	if err != nil {
 		return domain.Session{}, err
 	}
@@ -46,14 +52,16 @@ func (s *Service) StartInitiator(passphrase, peer string) (domain.Session, error
 		OPKID:       opkID,
 		InitiatorEK: ephPub,
 	}
-	if err := s.store.Save(sess); err != nil {
+
+	if err := s.store.SaveSession(peer, sess); err != nil {
 		return domain.Session{}, err
 	}
 	return sess, nil
 }
 
+// Get retrieves a stored session for the given peer.
 func (s *Service) Get(peer string) (domain.Session, bool, error) {
-	return s.store.Get(peer)
+	return s.store.LoadSession(peer)
 }
 
 var _ domain.SessionService = (*Service)(nil)

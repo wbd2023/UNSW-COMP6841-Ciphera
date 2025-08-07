@@ -19,9 +19,17 @@ func New(ids domain.IdentityStore, ps domain.PrekeyStore, bs domain.PrekeyBundle
 	return &Service{ids: ids, ps: ps, bs: bs}
 }
 
-// GenerateAndStore creates a signed-prekey pair and n one-time pairs.
+// GenerateAndStorePrekeys creates a signed-prekey and n one-time prekeys.
+//
 // It also marks the new signed-prekey as current.
-func (s *Service) GenerateAndStore(passphrase string, n int) (domain.X25519Public, []domain.X25519Public, error) {
+func (s *Service) GenerateAndStorePrekeys(
+	passphrase string,
+	n int,
+) (
+	domain.X25519Public,
+	[]domain.X25519Public,
+	error,
+) {
 	id, err := s.ids.LoadIdentity(passphrase)
 	if err != nil {
 		return domain.X25519Public{}, nil, err
@@ -34,10 +42,10 @@ func (s *Service) GenerateAndStore(passphrase string, n int) (domain.X25519Publi
 	}
 	spkID := fmt.Sprintf("spk-%d", time.Now().Unix())
 	sig := crypto.SignEd25519(id.EdPriv, spkPub[:])
-	if err := s.ps.SaveSignedPrekeyPair(spkID, spkPriv, spkPub, sig); err != nil {
+	if err := s.ps.SaveSignedPrekey(spkID, spkPriv, spkPub, sig); err != nil {
 		return domain.X25519Public{}, nil, err
 	}
-	if err := s.ps.SetCurrentSPKID(spkID); err != nil {
+	if err := s.ps.SetCurrentSignedPrekeyID(spkID); err != nil {
 		return domain.X25519Public{}, nil, err
 	}
 
@@ -53,28 +61,28 @@ func (s *Service) GenerateAndStore(passphrase string, n int) (domain.X25519Publi
 		pairs = append(pairs, domain.OneTimePair{ID: id, Priv: priv, Pub: pub})
 		publics = append(publics, pub)
 	}
-	if err := s.ps.SaveOneTimePairs(pairs); err != nil {
+	if err := s.ps.SaveOneTimePrekeys(pairs); err != nil {
 		return domain.X25519Public{}, nil, err
 	}
 	return spkPub, publics, nil
 }
 
-// LoadBundle builds the public bundle from the current signed-prekey and OPK list,
-// caches it, and returns it.
-func (s *Service) LoadBundle(passphrase, username string) (domain.PrekeyBundle, error) {
+// LoadPrekeyBundle builds the public bundle from the current signed-prekey and OPK list, caches it,
+// and returns it.
+func (s *Service) LoadPrekeyBundle(passphrase, username string) (domain.PrekeyBundle, error) {
 	id, err := s.ids.LoadIdentity(passphrase)
 	if err != nil {
 		return domain.PrekeyBundle{}, err
 	}
 
-	spkID, ok, err := s.ps.CurrentSPKID()
+	spkID, ok, err := s.ps.CurrentSignedPrekeyID()
 	if err != nil {
 		return domain.PrekeyBundle{}, err
 	}
 	if !ok {
 		return domain.PrekeyBundle{}, errNoSignedPrekey
 	}
-	_, spkPub, sig, found, err := s.ps.LoadSignedPrekeyPair(spkID)
+	_, spkPub, sig, found, err := s.ps.LoadSignedPrekey(spkID)
 	if err != nil {
 		return domain.PrekeyBundle{}, err
 	}
@@ -82,7 +90,7 @@ func (s *Service) LoadBundle(passphrase, username string) (domain.PrekeyBundle, 
 		return domain.PrekeyBundle{}, errNoSignedPrekey
 	}
 
-	oneTime, err := s.ps.ListOneTimePublics()
+	oneTime, err := s.ps.ListOneTimePrekeyPublics()
 	if err != nil {
 		return domain.PrekeyBundle{}, err
 	}
@@ -96,7 +104,7 @@ func (s *Service) LoadBundle(passphrase, username string) (domain.PrekeyBundle, 
 		SignedPrekeySig: sig,
 		OneTime:         oneTime,
 	}
-	if err := s.bs.SaveBundle(b); err != nil {
+	if err := s.bs.SavePrekeyBundle(b); err != nil {
 		return domain.PrekeyBundle{}, err
 	}
 	return b, nil

@@ -1,5 +1,4 @@
 // Implements an in-memory HTTP relay for prekey bundles and encrypted messages.
-// Development build with verbose request and handler logging.
 package main
 
 import (
@@ -30,48 +29,14 @@ func newState() *state {
 	}
 }
 
-// loggingResponseWriter captures status code and byte count for access logs.
-type loggingResponseWriter struct {
-	http.ResponseWriter
-	status int
-	bytes  int
-}
-
-func (lrw *loggingResponseWriter) WriteHeader(code int) {
-	lrw.status = code
-	lrw.ResponseWriter.WriteHeader(code)
-}
-
-func (lrw *loggingResponseWriter) Write(p []byte) (int, error) {
-	if lrw.status == 0 {
-		// If Write is called before WriteHeader, status is 200 by default.
-		lrw.status = http.StatusOK
-	}
-	n, err := lrw.ResponseWriter.Write(p)
-	lrw.bytes += n
-	return n, err
-}
-
-// withLogging wraps a handler to log method, path, remote, status, bytes, and duration.
-func withLogging(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		lrw := &loggingResponseWriter{ResponseWriter: w}
-		h(lrw, r)
-		dur := time.Since(start)
-		log.Printf(`Access: method=%s path=%s remote=%s status=%d bytes=%d dur=%s`,
-			r.Method, r.URL.Path, r.RemoteAddr, lrw.status, lrw.bytes, dur)
-	}
-}
-
 func main() {
 	s := newState()
 	mux := http.NewServeMux()
 
 	// Register HTTP endpoints.
-	mux.HandleFunc("/register", withLogging(s.handleRegister)) // POST /register
-	mux.HandleFunc("/prekey/", withLogging(s.handleGetPrekey)) // GET  /prekey/{username}
-	mux.HandleFunc("/msg/", withLogging(s.handleMsg))          // POST /msg/{user}, GET /msg/{user}, POST /msg/{user}/ack
+	mux.HandleFunc("/register", s.handleRegister) // POST /register
+	mux.HandleFunc("/prekey/", s.handleGetPrekey) // GET  /prekey/{username}
+	mux.HandleFunc("/msg/", s.handleMsg)          // POST /msg/{user}, GET /msg/{user}, POST /msg/{user}/ack
 
 	addr := ":8080"
 	log.Printf("Relay listening on http://%s", addr)
@@ -101,14 +66,6 @@ func (s *state) handleRegister(w http.ResponseWriter, r *http.Request) {
 	s.bundles[bundle.Username] = bundle
 	s.mu.Unlock()
 
-	log.Printf("Register: user=%q identity_key_set=%t sign_key_set=%t spk_id=%q one_time_count=%d",
-		bundle.Username,
-		!isZero32(bundle.IdentityKey[:]),
-		!isZero32(bundle.SignKey[:]),
-		bundle.SPKID,
-		len(bundle.OneTime),
-	)
-
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -133,15 +90,13 @@ func (s *state) handleGetPrekey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Prekey fetch: user=%q spk_id=%q one_time_count=%d",
-		username, bundle.SPKID, len(bundle.OneTime))
 	writeJSON(w, bundle)
 }
 
 // handleMsg handles three routes under /msg/:
-//   - POST /msg/{user}         enqueue a new Envelope
-//   - GET  /msg/{user}?limit=N fetch up to N queued Envelopes
-//   - POST /msg/{user}/ack     acknowledge and drop N messages
+//   - POST /msg/{user}         – enqueue a new Envelope
+//   - GET  /msg/{user}?limit=N – fetch up to N queued Envelopes
+//   - POST /msg/{user}/ack     – acknowledge and drop N messages
 func (s *state) handleMsg(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/msg/")
 	if path == "" {
@@ -166,10 +121,8 @@ func (s *state) handleMsg(w http.ResponseWriter, r *http.Request) {
 			ack.Count = len(queue)
 		}
 		s.queues[user] = queue[ack.Count:]
-		remaining := len(s.queues[user])
 		s.mu.Unlock()
 
-		log.Printf("ACK: user=%q drop=%d remaining=%d", user, ack.Count, remaining)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -195,13 +148,7 @@ func (s *state) handleMsg(w http.ResponseWriter, r *http.Request) {
 
 		s.mu.Lock()
 		s.queues[user] = append(s.queues[user], env)
-		qLen := len(s.queues[user])
 		s.mu.Unlock()
-
-		hasPrekey := env.Prekey != nil
-		cipherLen := len(env.Cipher)
-		log.Printf("Enqueue: to_user=%q from=%q to=%q cipher_bytes=%d has_prekey=%t queue_len_now=%d",
-			user, env.From, env.To, cipherLen, hasPrekey, qLen)
 
 		w.WriteHeader(http.StatusNoContent)
 
@@ -221,7 +168,6 @@ func (s *state) handleMsg(w http.ResponseWriter, r *http.Request) {
 		if limit == 0 || limit > len(queue) {
 			limit = len(queue)
 		}
-		log.Printf("Fetch: user=%q limit=%d available=%d", user, limit, len(queue))
 		writeJSON(w, queue[:limit])
 
 	default:
@@ -249,16 +195,4 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := enc.Encode(v); err != nil {
 		http.Error(w, fmt.Sprintf("encode error: %v", err), http.StatusInternalServerError)
 	}
-}
-
-// isZero32 checks whether a 32-byte slice is all zeros.
-func isZero32(b []byte) bool {
-	if len(b) != 32 {
-		return false
-	}
-	var acc byte
-	for _, x := range b {
-		acc |= x
-	}
-	return acc == 0
 }

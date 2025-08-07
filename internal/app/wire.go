@@ -11,50 +11,45 @@ import (
 	"ciphera/internal/store"
 )
 
-// Wire exposes composed dependencies for the CLI layer.
+// Wire bundles all stores, services, and clients for the CLI.
 type Wire struct {
 	Identity domain.IdentityStore
-	Prekeys  domain.PrekeyStore
-	Bundle   domain.PrekeyBundleStore
-
 	Prekey   domain.PrekeyService
 	Sessions domain.SessionService
-	Ratchets domain.RatchetStore
 	Messages domain.MessageService
 	Relay    domain.RelayClient
 	HTTP     *http.Client
 }
 
-// BuildFromConfig composes the app from Config.
-func BuildFromConfig(cfg Config) (*Wire, error) {
-	// Stores
-	fs := store.NewFileStore(cfg.Home) // IdentityStore + PrekeyStore + PrekeyBundleStore
-	sessStore := store.NewSessionFileStore(cfg.Home)
+// NewWire constructs the dependency graph from cfg.
+func NewWire(cfg Config) (*Wire, error) {
+	// File-based stores
+	identityStore := store.NewIdentityFileStore(cfg.Home)
+	prekeyStore := store.NewPrekeyFileStore(cfg.Home)
+	bundleStore := store.NewBundleFileStore(cfg.Home)
+	sessionStore := store.NewSessionFileStore(cfg.Home)
 	ratchetStore := store.NewRatchetFileStore(cfg.Home)
 
-	// Relay
-	rc := relay.NewHTTP(cfg.RelayURL)
-	if cfg.HTTP != nil {
-		rc.HTTP = cfg.HTTP
-	} else {
-		rc.HTTP = http.DefaultClient
+	// Ensure an HTTP client is available for outbound calls
+	httpClient := cfg.HTTP
+	if httpClient == nil {
+		httpClient = http.DefaultClient
 	}
 
-	// Services
-	pk := prekeysvc.New(fs, fs, fs)
-	sess := sessionsvc.New(fs, fs, rc, sessStore)
-	msg := messagesvc.New(fs, fs, sess, ratchetStore, rc)
+	// Relay client (uses provided HTTP client)
+	rc := relay.NewHTTP(cfg.RelayURL, httpClient)
+
+	// High-level services
+	prekeySvc := prekeysvc.New(identityStore, prekeyStore, bundleStore)
+	sessionSvc := sessionsvc.New(identityStore, bundleStore, rc, sessionStore)
+	messageSvc := messagesvc.New(identityStore, prekeyStore, sessionSvc, ratchetStore, rc)
 
 	return &Wire{
-		Identity: fs,
-		Prekeys:  fs,
-		Bundle:   fs,
-
-		Prekey:   pk,
-		Sessions: sess,
-		Ratchets: ratchetStore,
-		Messages: msg,
+		Identity: identityStore,
+		Prekey:   prekeySvc,
+		Sessions: sessionSvc,
+		Messages: messageSvc,
 		Relay:    rc,
-		HTTP:     rc.HTTP,
+		HTTP:     httpClient,
 	}, nil
 }

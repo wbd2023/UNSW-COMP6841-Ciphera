@@ -7,37 +7,43 @@ import (
 	"ciphera/internal/domain"
 )
 
-const sessFile = "sessions.json"
+const sessionsFilename = "sessions.json"
 
+// SessionFileStore persists established X3DH sessions to disk.
 type SessionFileStore struct {
 	dir string
 	mu  sync.Mutex
 }
 
-func NewSessionFileStore(dir string) *SessionFileStore { return &SessionFileStore{dir: dir} }
+// NewSessionFileStore returns a SessionFileStore rooted at dir.
+func NewSessionFileStore(dir string) *SessionFileStore {
+	return &SessionFileStore{dir: dir}
+}
 
-func (s *SessionFileStore) Save(sess domain.Session) error {
+// SaveSession writes a session record for peer.
+func (s *SessionFileStore) SaveSession(peer string, sess domain.Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	path := filepath.Join(s.dir, sessFile)
-	m := make(map[string]domain.Session)
+	path := filepath.Join(s.dir, sessionsFilename)
+	m := map[string]domain.Session{}
 	_ = readJSON(path, &m)
-	m[sess.Peer] = sess
+	m[peer] = sess
 	return writeJSON(path, m, 0o600)
 }
 
-func (s *SessionFileStore) Get(peer string) (domain.Session, bool, error) {
+// LoadSession retrieves a stored session for peer.
+func (s *SessionFileStore) LoadSession(peer string) (domain.Session, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	path := filepath.Join(s.dir, sessFile)
-	m := make(map[string]domain.Session)
+	path := filepath.Join(s.dir, sessionsFilename)
+	m := map[string]domain.Session{}
 	if err := readJSON(path, &m); err != nil {
 		return domain.Session{}, false, err
 	}
-	v, ok := m[peer]
-	return v, ok, nil
+	sess, ok := m[peer]
+	return sess, ok, nil
 }
 
 var _ domain.SessionStore = (*SessionFileStore)(nil)

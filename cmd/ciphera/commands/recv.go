@@ -6,33 +6,29 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// recv: fetch and decrypt queued messages for --username.
+// recvCmd fetches any queued ciphertexts, decrypts them and prints them.
 func recvCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "recv",
 		Short: "Fetch and decrypt your queued messages",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if passphrase == "" {
-				return fmt.Errorf("passphrase required (-p)")
-			}
-			if appCtx.Relay == nil {
-				return fmt.Errorf("no relay configured. use --relay")
-			}
-			if username == "" {
-				return fmt.Errorf("--username required")
+			// 0 = no limit, fetch everything
+			msgs, err := appCtx.Messages.Receive(passphrase, username, 0)
+			if err != nil {
+				return fmt.Errorf("receiving messages: %w", err)
 			}
 
-			msgs, err := appCtx.Messages.Recv(passphrase, username, 0)
-			if err != nil {
-				return err
-			}
 			for _, m := range msgs {
 				fmt.Printf("[%s] %s\n", m.From, string(m.Plaintext))
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&username, "username", "", "your username (same as you registered with)")
+
+	// Username flag is local to this command
+	cmd.Flags().StringVarP(&username, "username", "u", "", "your registered username")
 	_ = cmd.MarkFlagRequired("username")
+
 	return cmd
 }

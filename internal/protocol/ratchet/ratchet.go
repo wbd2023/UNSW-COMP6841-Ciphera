@@ -1,3 +1,4 @@
+// Package ratchet implements the Double Ratchet algorithm following Signal’s design.
 package ratchet
 
 import (
@@ -16,25 +17,30 @@ import (
 )
 
 const (
-	aeadKeySize  = 32
+	aeadKeySize  = chacha20poly1305.KeySize
 	nonceSize    = chacha20poly1305.NonceSize
 	maxSkippedMK = 1000
 )
 
 var (
-	ErrSkippedKeyNotFound = errors.New("skipped message key not found")
-	errChainUninitialised = errors.New("ratchet chain key is uninitialised")
+	errChainUninitialised        = errors.New("ratchet chain key uninitialised")
+	ErrSkippedMessageKeyNotFound = errors.New("skipped message key not found")
 )
 
-// InitAsInitiator seeds the sending chain from rk using a fresh ratchet key and the peer identity pub.
-func InitAsInitiator(root []byte, _ domain.X25519Private, _ domain.X25519Public, peerIdentity domain.X25519Public) (domain.RatchetState, error) {
+// InitAsInitiator initialises the ratchet state for the sender, deriving only the send chain key
+// from the given root and peer identity.
+func InitAsInitiator(
+	root []byte,
+	_ domain.X25519Private,
+	_ domain.X25519Public,
+	peerIdentity domain.X25519Public,
+) (domain.RatchetState, error) {
+	// Generate ephemeral key
 	var priv domain.X25519Private
 	if _, err := rand.Read(priv[:]); err != nil {
 		return domain.RatchetState{}, err
 	}
-	priv[0] &= 248
-	priv[31] &= 127
-	priv[31] |= 64
+	crypto.ClampX25519PrivateKey(&priv)
 
 	pubBytes, err := curve25519.X25519(priv.Slice(), curve25519.Basepoint)
 	if err != nil {
@@ -43,36 +49,38 @@ func InitAsInitiator(root []byte, _ domain.X25519Private, _ domain.X25519Public,
 	var pub domain.X25519Public
 	copy(pub[:], pubBytes)
 
-	dh, err := x25519(priv, peerIdentity)
+	// Single DH: EK_A ⋅ IK_B
+	dh, err := crypto.DH(priv, peerIdentity)
 	if err != nil {
 		return domain.RatchetState{}, err
 	}
-	newRK, sendCK := kdfRK(root, dh[:])
+	newRoot, sendCK := kdfRK(root, dh[:])
 	crypto.Wipe(dh[:])
 
 	return domain.RatchetState{
-		RootKey:   newRK,
+		RootKey:   newRoot,
 		DHPriv:    priv,
 		DHPub:     pub,
-		PeerDHPub: peerIdentity, // placeholder until first remote ratchet pub arrives
+		PeerDHPub: peerIdentity,
 		SendCK:    sendCK,
-		RecvCK:    nil,
-		Ns:        0,
-		Nr:        0,
-		PN:        0,
 		Skipped:   make(map[string][]byte),
 	}, nil
 }
 
-// InitAsResponder seeds the receiving chain from rk using our identity priv and the sender ratchet pub.
-func InitAsResponder(root []byte, ourIDPriv domain.X25519Private, _ domain.X25519Public, senderRatchetPub domain.X25519Public) (domain.RatchetState, error) {
+// InitAsResponder initialises the ratchet state for the receiver, deriving only the receive chain
+// key from the given root and sender’s ratchet pub.
+func InitAsResponder(
+	root []byte,
+	ourIDPriv domain.X25519Private,
+	_ domain.X25519Public,
+	senderRatchetPub domain.X25519Public,
+) (domain.RatchetState, error) {
+	// Generate ephemeral key
 	var priv domain.X25519Private
 	if _, err := rand.Read(priv[:]); err != nil {
 		return domain.RatchetState{}, err
 	}
-	priv[0] &= 248
-	priv[31] &= 127
-	priv[31] |= 64
+	crypto.ClampX25519PrivateKey(&priv)
 
 	pubBytes, err := curve25519.X25519(priv.Slice(), curve25519.Basepoint)
 	if err != nil {
@@ -81,138 +89,142 @@ func InitAsResponder(root []byte, ourIDPriv domain.X25519Private, _ domain.X2551
 	var pub domain.X25519Public
 	copy(pub[:], pubBytes)
 
-	dh, err := x25519(ourIDPriv, senderRatchetPub)
+	// Single DH: IK_B ⋅ EK_A
+	dh, err := crypto.DH(ourIDPriv, senderRatchetPub)
 	if err != nil {
 		return domain.RatchetState{}, err
 	}
-	newRK, recvCK := kdfRK(root, dh[:])
+	newRoot, recvCK := kdfRK(root, dh[:])
 	crypto.Wipe(dh[:])
 
 	return domain.RatchetState{
-		RootKey:   newRK,
+		RootKey:   newRoot,
 		DHPriv:    priv,
 		DHPub:     pub,
 		PeerDHPub: senderRatchetPub,
-		SendCK:    nil,
 		RecvCK:    recvCK,
-		Ns:        0,
-		Nr:        0,
-		PN:        0,
 		Skipped:   make(map[string][]byte),
 	}, nil
 }
 
-// Encrypt produces a header and ciphertext, auto-stepping the DH ratchet on the first send after responding.
-func Encrypt(st *domain.RatchetState, ad, plaintext []byte) (domain.RatchetHeader, []byte, error) {
-	// If SendCK is not yet initialised (responder’s first send), perform a DH ratchet step.
-	if len(st.SendCK) == 0 {
+// Encrypt encrypts plaintext under the send chain, performing a lazy ratchet step on the first send
+// when SendCK is nil.
+func Encrypt(
+	st *domain.RatchetState,
+	ad, plaintext []byte,
+) (domain.RatchetHeader, []byte, error) {
+	if st == nil {
+		return domain.RatchetHeader{}, nil, errors.New("ratchet state uninitialised")
+	}
+
+	// Lazy responder ratchet
+	if st.SendCK == nil {
 		st.PN = st.Ns
-		st.Ns = 0
+		st.Ns, st.Nr = 0, 0
 
-		// New sending ratchet key pair.
-		var newPriv domain.X25519Private
-		if _, err := rand.Read(newPriv[:]); err != nil {
+		var priv domain.X25519Private
+		if _, err := rand.Read(priv[:]); err != nil {
 			return domain.RatchetHeader{}, nil, err
 		}
-		newPriv[0] &= 248
-		newPriv[31] &= 127
-		newPriv[31] |= 64
+		crypto.ClampX25519PrivateKey(&priv)
 
-		pubBytes, err := curve25519.X25519(newPriv.Slice(), curve25519.Basepoint)
+		pubBytes, err := curve25519.X25519(priv.Slice(), curve25519.Basepoint)
 		if err != nil {
 			return domain.RatchetHeader{}, nil, err
 		}
-		var newPub domain.X25519Public
-		copy(newPub[:], pubBytes)
+		var pub domain.X25519Public
+		copy(pub[:], pubBytes)
 
-		// Advance root and create SendCK using our new priv and the peer’s current ratchet pub.
-		dh, err := x25519(newPriv, st.PeerDHPub)
+		dh, err := crypto.DH(priv, st.PeerDHPub)
 		if err != nil {
 			return domain.RatchetHeader{}, nil, err
 		}
-		rk2, sendCK := kdfRK(st.RootKey, dh[:])
+		newRoot, sendCK := kdfRK(st.RootKey, dh[:])
 		crypto.Wipe(dh[:])
 
-		st.RootKey = rk2
-		st.DHPriv, st.DHPub = newPriv, newPub
-		st.SendCK = sendCK
+		st.RootKey, st.DHPriv, st.DHPub, st.SendCK = newRoot, priv, pub, sendCK
 	}
 
 	mk, err := kdfCKSend(st)
 	if err != nil {
 		return domain.RatchetHeader{}, nil, err
 	}
-	h := domain.RatchetHeader{DHPub: st.DHPub.Slice(), PN: st.PN, N: st.Ns}
 
-	ct, err := seal(mk, h, ad, plaintext)
+	header := domain.RatchetHeader{
+		DHPub: st.DHPub.Slice(),
+		PN:    st.PN,
+		N:     st.Ns,
+	}
+	ct, err := seal(mk, header, ad, plaintext)
 	crypto.Wipe(mk)
 	if err != nil {
 		return domain.RatchetHeader{}, nil, err
 	}
+
 	st.Ns++
-	return h, ct, nil
+	return header, ct, nil
 }
 
-// Decrypt handles skipped keys, does DH ratchet on new remote pubs, then opens the message.
-func Decrypt(st *domain.RatchetState, ad []byte, header domain.RatchetHeader, ciphertext []byte) ([]byte, error) {
-	// Same DH pub: try a skipped key.
-	if equal32(st.PeerDHPub[:], header.DHPub) {
-		skipUntil(st, header.N)
-		keyID := skippedKeyID(st.PeerDHPub, header.N)
-		if mk, ok := st.Skipped[keyID]; ok {
-			delete(st.Skipped, keyID)
-			pt, err := open(mk, header, ad, ciphertext)
-			crypto.Wipe(mk)
-			if err != nil {
-				return nil, err
-			}
-			st.Nr = header.N + 1
-			return pt, nil
-		}
+// Decrypt decrypts ciphertext, handling skipped keys and ratchet steps.
+func Decrypt(
+	st *domain.RatchetState,
+	ad []byte,
+	header domain.RatchetHeader,
+	ciphertext []byte,
+) ([]byte, error) {
+	if st == nil {
+		return nil, errors.New("ratchet state uninitialised")
 	}
 
-	// New DH pub: advance receiving and then sending chains.
-	if !equal32(st.PeerDHPub[:], header.DHPub) {
-		skipUntil(st, header.PN)
-
-		var newPeer domain.X25519Public
-		copy(newPeer[:], header.DHPub)
-
-		dh, err := x25519(st.DHPriv, newPeer)
+	// Try skipped messages
+	skipUntil(st, header.PN)
+	keyID := skippedKeyID(st.PeerDHPub, header.N)
+	if mk, ok := st.Skipped[keyID]; ok {
+		delete(st.Skipped, keyID)
+		pt, err := open(mk, header, ad, ciphertext)
+		crypto.Wipe(mk)
 		if err != nil {
 			return nil, err
 		}
-		rk2, recvCK := kdfRK(st.RootKey, dh[:])
+		st.Nr = header.N + 1
+		return pt, nil
+	}
+
+	// New ratchet step?
+	if !equal32(st.PeerDHPub.Slice(), header.DHPub) {
+		var peer domain.X25519Public
+		copy(peer[:], header.DHPub)
+
+		dh, err := crypto.DH(st.DHPriv, peer)
+		if err != nil {
+			return nil, err
+		}
+		newRoot, recvCK := kdfRK(st.RootKey, dh[:])
 		crypto.Wipe(dh[:])
 
-		var newPriv domain.X25519Private
-		if _, err := rand.Read(newPriv[:]); err != nil {
+		var priv domain.X25519Private
+		if _, err := rand.Read(priv[:]); err != nil {
 			return nil, err
 		}
-		newPriv[0] &= 248
-		newPriv[31] &= 127
-		newPriv[31] |= 64
+		crypto.ClampX25519PrivateKey(&priv)
 
-		pubBytes, err := curve25519.X25519(newPriv.Slice(), curve25519.Basepoint)
+		pubBytes, err := curve25519.X25519(priv.Slice(), curve25519.Basepoint)
 		if err != nil {
 			return nil, err
 		}
-		var newPub domain.X25519Public
-		copy(newPub[:], pubBytes)
+		var pub domain.X25519Public
+		copy(pub[:], pubBytes)
 
-		dh2, err := x25519(newPriv, newPeer)
+		dh2, err := crypto.DH(priv, peer)
 		if err != nil {
 			return nil, err
 		}
-		rk3, sendCK := kdfRK(rk2, dh2[:])
+		rk2, sendCK := kdfRK(newRoot, dh2[:])
 		crypto.Wipe(dh2[:])
 
-		st.PN = st.Ns
-		st.Ns, st.Nr = 0, 0
-		st.RootKey = rk3
-		st.DHPriv, st.DHPub = newPriv, newPub
-		st.PeerDHPub = newPeer
-		st.SendCK, st.RecvCK = sendCK, recvCK
+		st.PN, st.Ns, st.Nr = st.Ns, 0, 0
+		st.RootKey, st.DHPriv, st.DHPub, st.PeerDHPub, st.SendCK, st.RecvCK = rk2, priv, pub, peer, sendCK, recvCK
+		st.Skipped = make(map[string][]byte)
 	}
 
 	mk, err := kdfCKRecv(st)
@@ -228,8 +240,47 @@ func Decrypt(st *domain.RatchetState, ad []byte, header domain.RatchetHeader, ci
 	return pt, nil
 }
 
-// --- helpers ---
+// --- Helpers ---
 
+// kdfRK derives a new root key and chain key from the DH output.
+func kdfRK(root, dh []byte) (newRoot, ck []byte) {
+	hk := hkdf.New(sha256.New, dh, root, []byte("DR|rk"))
+	newRoot = make([]byte, 32)
+	ck = make([]byte, 32)
+	io.ReadFull(hk, newRoot)
+	io.ReadFull(hk, ck)
+	return
+}
+
+// kdfCKSend advances the send-chain key, returning the next message key.
+func kdfCKSend(st *domain.RatchetState) ([]byte, error) {
+	if st.SendCK == nil {
+		return nil, errChainUninitialised
+	}
+	hk := hkdf.New(sha256.New, st.SendCK, nil, []byte("DR|ck"))
+	nextCK := make([]byte, 32)
+	mk := make([]byte, 32)
+	io.ReadFull(hk, nextCK)
+	io.ReadFull(hk, mk)
+	st.SendCK = nextCK
+	return mk, nil
+}
+
+// kdfCKRecv advances the receive-chain key, returning the next message key.
+func kdfCKRecv(st *domain.RatchetState) ([]byte, error) {
+	if st.RecvCK == nil {
+		return nil, errChainUninitialised
+	}
+	hk := hkdf.New(sha256.New, st.RecvCK, nil, []byte("DR|ck"))
+	nextCK := make([]byte, 32)
+	mk := make([]byte, 32)
+	io.ReadFull(hk, nextCK)
+	io.ReadFull(hk, mk)
+	st.RecvCK = nextCK
+	return mk, nil
+}
+
+// seal encrypts plaintext with ChaCha20-Poly1305 using header||PN as associated data.
 func seal(mk []byte, header domain.RatchetHeader, ad, plaintext []byte) ([]byte, error) {
 	aead, err := chacha20poly1305.New(mk[:aeadKeySize])
 	if err != nil {
@@ -240,6 +291,7 @@ func seal(mk []byte, header domain.RatchetHeader, ad, plaintext []byte) ([]byte,
 	return aead.Seal(nil, nonce, plaintext, append(ad, headerBytes(header)...)), nil
 }
 
+// open decrypts ciphertext with ChaCha20-Poly1305.
 func open(mk []byte, header domain.RatchetHeader, ad, ciphertext []byte) ([]byte, error) {
 	aead, err := chacha20poly1305.New(mk[:aeadKeySize])
 	if err != nil {
@@ -250,72 +302,17 @@ func open(mk []byte, header domain.RatchetHeader, ad, ciphertext []byte) ([]byte
 	return aead.Open(nil, nonce, ciphertext, append(ad, headerBytes(header)...))
 }
 
+// headerBytes serializes PN and N into big-endian bytes appended after DHPub.
 func headerBytes(h domain.RatchetHeader) []byte {
-	out := make([]byte, 0, len(h.DHPub)+8)
-	out = append(out, h.DHPub...)
-	var b [4]byte
-	binary.BigEndian.PutUint32(b[:], h.PN)
-	out = append(out, b[:]...)
-	binary.BigEndian.PutUint32(b[:], h.N)
-	out = append(out, b[:]...)
-	return out
+	var tmp [4]byte
+	out := append([]byte{}, h.DHPub...)
+	binary.BigEndian.PutUint32(tmp[:], h.PN)
+	out = append(out, tmp[:]...)
+	binary.BigEndian.PutUint32(tmp[:], h.N)
+	return append(out, tmp[:]...)
 }
 
-func x25519(priv domain.X25519Private, pub domain.X25519Public) ([32]byte, error) {
-	res, err := curve25519.X25519(priv.Slice(), pub.Slice())
-	var out [32]byte
-	if err != nil {
-		return out, err
-	}
-	copy(out[:], res)
-	return out, nil
-}
-
-// HKDF-based KDFs with labels.
-func kdfRK(rk, dh []byte) (newRK, ck []byte) {
-	r := hkdf.New(sha256.New, dh, rk, []byte("DR|rk"))
-	newRK = make([]byte, 32)
-	ck = make([]byte, 32)
-	_, _ = io.ReadFull(r, newRK)
-	_, _ = io.ReadFull(r, ck)
-	return
-}
-
-func kdfCK(ck []byte) (nextCK, mk []byte) {
-	r := hkdf.New(sha256.New, ck, nil, []byte("DR|ck"))
-	nextCK = make([]byte, 32)
-	mk = make([]byte, 32)
-	_, _ = io.ReadFull(r, nextCK)
-	_, _ = io.ReadFull(r, mk)
-	return
-}
-
-func kdfCKSend(st *domain.RatchetState) ([]byte, error) {
-	if len(st.SendCK) == 0 {
-		return nil, errChainUninitialised
-	}
-	nextCK, mk := kdfCK(st.SendCK)
-	st.SendCK = nextCK
-	return mk, nil
-}
-
-func kdfCKRecv(st *domain.RatchetState) ([]byte, error) {
-	if len(st.RecvCK) == 0 {
-		return nil, errChainUninitialised
-	}
-	nextCK, mk := kdfCK(st.RecvCK)
-	st.RecvCK = nextCK
-	return mk, nil
-}
-
-func skippedKeyID(peer domain.X25519Public, n uint32) string {
-	b := make([]byte, 32+4)
-	copy(b, peer[:])
-	binary.BigEndian.PutUint32(b[32:], n)
-	return string(b)
-}
-
-// skipUntil derives and stores message keys up to pn with a hard cap.
+// skipUntil derives and stores skipped message keys up to pn.
 func skipUntil(st *domain.RatchetState, pn uint32) {
 	for st.Nr < pn {
 		mk, _ := kdfCKRecv(st)
@@ -330,12 +327,21 @@ func skipUntil(st *domain.RatchetState, pn uint32) {
 	}
 }
 
+// skippedKeyID yields a unique map key from peerDHPub||n.
+func skippedKeyID(pub domain.X25519Public, n uint32) string {
+	var buf [36]byte
+	copy(buf[:32], pub[:])
+	binary.BigEndian.PutUint32(buf[32:], n)
+	return string(buf[:])
+}
+
+// equal32 compares two 32-byte slices in constant time.
 func equal32(a, b []byte) bool {
 	if len(a) != 32 || len(b) != 32 {
 		return false
 	}
 	var v byte
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		v |= a[i] ^ b[i]
 	}
 	return v == 0

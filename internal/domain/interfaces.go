@@ -1,72 +1,69 @@
 package domain
 
-// IdentityStore persists the local identity encrypted at rest.
+// IdentityStore persists your long-term identity keys.
 type IdentityStore interface {
-	Save(passphrase string, id Identity) error
+	SaveIdentity(passphrase string, id Identity) error
 	LoadIdentity(passphrase string) (Identity, error)
 }
 
-// PrekeyStore keeps signed and one-time prekey PAIRS locally.
+// PrekeyStore manages signed and one-time prekeys on disk.
 type PrekeyStore interface {
-	SaveSignedPrekeyPair(id string, priv X25519Private, pub X25519Public, sig []byte) error
-	LoadSignedPrekeyPair(id string) (priv X25519Private, pub X25519Public, sig []byte, ok bool, err error)
+	// Signed prekey
+	SaveSignedPrekey(id string, priv X25519Private, pub X25519Public, sig []byte) error
+	LoadSignedPrekey(id string) (priv X25519Private, pub X25519Public, sig []byte, ok bool, err error)
 
-	SaveOneTimePairs(pairs []OneTimePair) error
-	ConsumeOneTimePair(id string) (priv X25519Private, pub X25519Public, ok bool, err error)
+	// One-time prekeys
+	SaveOneTimePrekeys(pairs []OneTimePair) error
+	ConsumeOneTimePrekey(id string) (priv X25519Private, pub X25519Public, ok bool, err error)
+	ListOneTimePrekeyPublics() ([]OneTimePub, error)
 
-	SetCurrentSPKID(id string) error
-	CurrentSPKID() (string, bool, error)
-	ListOneTimePublics() ([]OneTimePub, error)
+	// Current signed prekey selection
+	SetCurrentSignedPrekeyID(id string) error
+	CurrentSignedPrekeyID() (string, bool, error)
 }
 
-// OneTimePair is a local OPK pair.
-type OneTimePair struct {
-	ID   string
-	Priv X25519Private
-	Pub  X25519Public
-}
-
-// PrekeyBundleStore caches the last uploaded bundle (public material).
+// PrekeyBundleStore caches the last bundle you registered.
 type PrekeyBundleStore interface {
-	SaveBundle(b PrekeyBundle) error
-	LoadBundle(username string) (PrekeyBundle, bool, error)
+	SavePrekeyBundle(b PrekeyBundle) error
+	LoadPrekeyBundle(username string) (PrekeyBundle, bool, error)
 }
 
-// RelayClient is the transport to the relay.
-type RelayClient interface {
-	Register(b PrekeyBundle) error
-	FetchPrekey(username string) (PrekeyBundle, error)
-	SendMessage(env Envelope) error
-	FetchMessages(username string, limit int) ([]Envelope, error)
-	AckMessages(username string, count int) error
-}
-
-// SessionStore persists X3DH sessions.
+// SessionStore persists established X3DH sessions.
 type SessionStore interface {
-	Save(sess Session) error
-	Get(peer string) (Session, bool, error)
+	SaveSession(peer string, sess Session) error
+	LoadSession(peer string) (Session, bool, error)
 }
 
-// RatchetStore persists per-peer ratchet state.
+// RatchetStore keeps per-peer Double-Ratchet state.
 type RatchetStore interface {
-	Save(conv Conversation) error
-	Load(peer string) (Conversation, bool, error)
+	SaveConversation(peer string, conv Conversation) error
+	LoadConversation(peer string) (Conversation, bool, error)
 }
 
-// PrekeyService creates prekey pairs and assembles the public bundle.
+// PrekeyService generates and assembles your prekey bundles.
 type PrekeyService interface {
-	GenerateAndStore(passphrase string, n int) (X25519Public, []X25519Public, error)
-	LoadBundle(passphrase, username string) (PrekeyBundle, error)
+	GenerateAndStorePrekeys(passphrase string, n int) (X25519Public, []X25519Public, error)
+	LoadPrekeyBundle(passphrase, username string) (PrekeyBundle, error)
 }
 
-// SessionService runs X3DH and returns a Session.
+// SessionService establishes or retrieves an X3DH session.
 type SessionService interface {
-	StartInitiator(passphrase, peer string) (Session, error)
+	Initiate(passphrase, peer string) (Session, error)
 	Get(peer string) (Session, bool, error)
 }
 
 // MessageService encrypts, sends, fetches and decrypts messages.
 type MessageService interface {
-	Send(passphrase, fromUsername, toUsername string, plaintext []byte) error
-	Recv(passphrase, me string, limit int) ([]DecryptedMessage, error)
+	Send(passphrase, from, to string, plaintext []byte) error
+	Receive(passphrase, me string, limit int) ([]DecryptedMessage, error)
+}
+
+// RelayClient is how we talk to the central relay server.
+type RelayClient interface {
+	RegisterPrekeyBundle(b PrekeyBundle) error
+	FetchPrekeyBundle(username string) (PrekeyBundle, error)
+
+	SendMessage(env Envelope) error
+	FetchMessages(username string, limit int) ([]Envelope, error)
+	AckMessages(username string, count int) error
 }

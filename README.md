@@ -165,6 +165,8 @@ Ciphera supports simple relay setups.
 
 ## Command reference
 
+### Client (`./bin/ciphera`)
+
 ```text
 ciphera init          --passphrase <pass> [--home <dir>]
 ciphera fingerprint   --passphrase <pass> [--home <dir>]
@@ -179,6 +181,17 @@ Common flags:
 * `--home` sets where Ciphera stores its files. Default is `~/.ciphera`.
 * `--relay` sets the relay base URL.
 * `--passphrase` protects your keys on disk and unlocks them when needed.
+
+### Relay (`./bin/relay`)
+
+```text
+relay --port <port> --log
+```
+
+Common flags:
+
+* `--port` sets the port the relay is available on.
+* `--log` enables logging for the relay.
 
 ## Where Ciphera stores your data
 

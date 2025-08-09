@@ -1,4 +1,3 @@
-// Package x3dh implements the X3DH key-agreement bootstrap used by Double Ratchet.
 package x3dh
 
 import (

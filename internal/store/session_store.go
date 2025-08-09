@@ -46,4 +46,5 @@ func (s *SessionFileStore) LoadSession(peer string) (domain.Session, bool, error
 	return sess, ok, nil
 }
 
+// Compile-time assertion that SessionFileStore implements domain.SessionStore.
 var _ domain.SessionStore = (*SessionFileStore)(nil)

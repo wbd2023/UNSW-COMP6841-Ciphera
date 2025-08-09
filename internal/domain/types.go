@@ -122,5 +122,5 @@ type RatchetState struct {
 	Ns        uint32            `json:"ns"`
 	Nr        uint32            `json:"nr"`
 	PN        uint32            `json:"pn"`
-	Skipped   map[string][]byte `json:"skipped,omitempty"`
+	Skipped   map[string][]byte `json:"skipped"`
 }

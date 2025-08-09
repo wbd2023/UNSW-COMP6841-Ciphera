@@ -6,8 +6,8 @@ ALICE_HOME="/tmp/alice-ciphera-basic-alice"
 BOB_HOME="/tmp/bob-ciphera-basic-bob"
 ALICE_USER="alice"
 BOB_USER="bob"
-ALICE_PASS="alice-pass"
-BOB_PASS="bob-pass"
+ALICE_PASS="Alice-pass1234"
+BOB_PASS="Bob-pass1234"
 
 ROOT_DIR="$(
   git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null \

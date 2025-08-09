@@ -168,4 +168,5 @@ func (s *PrekeyFileStore) CurrentSignedPrekeyID() (string, bool, error) {
 	return meta.CurrentSPKID, true, nil
 }
 
+// Compile-time assertion that PrekeyFileStore implements domain.PrekeyStore.
 var _ domain.PrekeyStore = (*PrekeyFileStore)(nil)

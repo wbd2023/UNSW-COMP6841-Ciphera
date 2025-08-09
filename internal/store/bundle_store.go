@@ -48,4 +48,5 @@ func (s *BundleFileStore) LoadPrekeyBundle(username string) (domain.PrekeyBundle
 	return b, true, nil
 }
 
+// Compile-time assertion that BundleFileStore implements domain.PrekeyBundleStore.
 var _ domain.PrekeyBundleStore = (*BundleFileStore)(nil)

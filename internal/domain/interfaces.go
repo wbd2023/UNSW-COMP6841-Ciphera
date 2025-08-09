@@ -1,5 +1,7 @@
 package domain
 
+import "context"
+
 // IdentityStore persists your long-term identity keys.
 type IdentityStore interface {
 	SaveIdentity(passphrase string, id Identity) error
@@ -40,6 +42,13 @@ type RatchetStore interface {
 	LoadConversation(peer string) (Conversation, bool, error)
 }
 
+// IdentityService creates, retrieves, and inspects your identity keys.
+type IdentityService interface {
+	GenerateIdentity(passphrase string) (Identity, string, error)
+	LoadIdentity(passphrase string) (Identity, error)
+	FingerprintIdentity(passphrase string) (string, error)
+}
+
 // PrekeyService generates and assembles your prekey bundles.
 type PrekeyService interface {
 	GenerateAndStorePrekeys(passphrase string, n int) (X25519Public, []X25519Public, error)
@@ -48,22 +57,22 @@ type PrekeyService interface {
 
 // SessionService establishes or retrieves an X3DH session.
 type SessionService interface {
-	Initiate(passphrase, peer string) (Session, error)
-	Get(peer string) (Session, bool, error)
+	InitiateSession(ctx context.Context, passphrase, peer string) (Session, error)
+	GetSession(peer string) (Session, bool, error)
 }
 
 // MessageService encrypts, sends, fetches and decrypts messages.
 type MessageService interface {
-	Send(passphrase, from, to string, plaintext []byte) error
-	Receive(passphrase, me string, limit int) ([]DecryptedMessage, error)
+	SendMessage(ctx context.Context, passphrase, from, to string, plaintext []byte) error
+	ReceiveMessage(ctx context.Context, passphrase, me string, limit int) ([]DecryptedMessage, error)
 }
 
-// RelayClient is how we talk to the central relay server.
+// RelayClient is how we talk to the central relay server, all with context.
 type RelayClient interface {
-	RegisterPrekeyBundle(b PrekeyBundle) error
-	FetchPrekeyBundle(username string) (PrekeyBundle, error)
+	RegisterPrekeyBundle(ctx context.Context, b PrekeyBundle) error
+	FetchPrekeyBundle(ctx context.Context, username string) (PrekeyBundle, error)
 
-	SendMessage(env Envelope) error
-	FetchMessages(username string, limit int) ([]Envelope, error)
-	AckMessages(username string, count int) error
+	SendMessage(ctx context.Context, env Envelope) error
+	FetchMessages(ctx context.Context, username string, limit int) ([]Envelope, error)
+	AckMessages(ctx context.Context, username string, count int) error
 }

@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# TODO: fix bug captured by this test
-exit 0
-
 RELAY_URL="http://127.0.0.1:8080"
 ALICE_HOME="/tmp/alice-ciphera-t4-alice"
 BOB_HOME="/tmp/bob-ciphera-t4-bob"
 ALICE_USER="alice"
 BOB_USER="bob"
-ALICE_PASS="alice-pass"
-BOB_PASS="bob-pass"
+ALICE_PASS="Alice-pass1234"
+BOB_PASS="Bob-pass1234"
 
 ROOT_DIR="$(
   git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null \
@@ -29,6 +26,9 @@ cleanup() {
   rm -rf "${ALICE_HOME}" "${BOB_HOME}"
 }
 trap cleanup EXIT
+
+# Check deps
+command -v jq >/dev/null 2>&1 || { echo "jq is required"; exit 1; }
 
 # Build
 mkdir -p "${BIN_DIR}"
@@ -49,7 +49,7 @@ done
 rm -rf "${ALICE_HOME}" "${BOB_HOME}"
 mkdir -p "${ALICE_HOME}" "${BOB_HOME}"
 
-# Initialize & register both peers
+# Initialise and register both peers
 "${CIPHERA_BIN}" init \
   --home       "${ALICE_HOME}" \
   --passphrase "${ALICE_PASS}"
@@ -58,6 +58,7 @@ mkdir -p "${ALICE_HOME}" "${BOB_HOME}"
   --relay      "${RELAY_URL}" \
   "${ALICE_USER}" \
   --passphrase "${ALICE_PASS}"
+
 "${CIPHERA_BIN}" init \
   --home       "${BOB_HOME}" \
   --passphrase "${BOB_PASS}"
@@ -79,7 +80,22 @@ mkdir -p "${ALICE_HOME}" "${BOB_HOME}"
   "${ALICE_USER}" \
   --passphrase "${BOB_PASS}"
 
-# Alice sends two messages
+# Bootstrap the conversation so later messages are in the same chain
+"${CIPHERA_BIN}" send \
+  --home       "${ALICE_HOME}" \
+  --username   "${ALICE_USER}" \
+  --relay      "${RELAY_URL}" \
+  --passphrase "${ALICE_PASS}" \
+  "${BOB_USER}" \
+  "bootstrap"
+# Bob receives and acks bootstrap
+"${CIPHERA_BIN}" recv \
+  --home       "${BOB_HOME}" \
+  --username   "${BOB_USER}" \
+  --relay      "${RELAY_URL}" \
+  --passphrase "${BOB_PASS}" >/dev/null
+
+# Alice sends two messages in the same chain
 MSG1="first"
 MSG2="second"
 "${CIPHERA_BIN}" send \
@@ -97,36 +113,58 @@ MSG2="second"
   "${BOB_USER}" \
   "${MSG2}"
 
-# Re-order: fetch, reverse, re-post
-ENVS="$(curl -s "${RELAY_URL}/msg/${BOB_USER}")"
-FIRST="$(jq '.[1]' <<<"${ENVS}")"
-SECOND="$(jq '.[0]' <<<"${ENVS}")"
-echo "Reposting in reversed order"
-printf '%s\n%s\n' "${FIRST}" "${SECOND}" \
-  | jq -s . \
-  | curl -sS -X POST -H 'Content-Type: application/json' -d @- \
-    "${RELAY_URL}/msg/${BOB_USER}" >/dev/null
+# Fetch only those two, then ack them to clear the queue
+ENVS="$(curl -sSf "${RELAY_URL}/msg/${BOB_USER}?limit=2")"
+COUNT="$(jq 'length' <<<"${ENVS}")"
+if [[ "${COUNT}" -ne 2 ]]; then
+  echo "[-] Expected 2 envelopes, got ${COUNT}"
+  echo "${ENVS}"
+  exit 1
+fi
+curl -sSf -X POST -H 'Content-Type: application/json' \
+  -d "{\"count\": ${COUNT}}" \
+  "${RELAY_URL}/msg/${BOB_USER}/ack" >/dev/null
 
-# Bob receives both messages
+# Reverse the order and re-post as two separate envelopes
+FIRST="$(jq -c '.[0]' <<<"${ENVS}")"  # original first
+SECOND="$(jq -c '.[1]' <<<"${ENVS}")" # original second
+
+echo "Reposting in reversed order (second, then first)"
+printf '%s' "${SECOND}" \
+  | curl -sSf -X POST -H 'Content-Type: application/json' -d @- \
+      "${RELAY_URL}/msg/${BOB_USER}" >/dev/null
+printf '%s' "${FIRST}" \
+  | curl -sSf -X POST -H 'Content-Type: application/json' -d @- \
+      "${RELAY_URL}/msg/${BOB_USER}" >/dev/null
+
+# Bob receives both messages (arrived out of order)
 echo "[*] Bob receiving messages:"
 RECV_OUTPUT="$("${CIPHERA_BIN}" recv \
   --home       "${BOB_HOME}" \
   --username   "${BOB_USER}" \
   --relay      "${RELAY_URL}" \
   --passphrase "${BOB_PASS}")"
+echo "${RECV_OUTPUT}"
 
-# Assert the output contains exactly the two messages in correct order
-# It might print lines like "From alice: first" etc., so we grep in sequence
-if ! grep -q "first" <<<"$RECV_OUTPUT"; then
-  echo "[-] Did not find first message in output!"
-  echo "$RECV_OUTPUT"
+# Assert both are present once
+if [[ "$(grep -o "first" <<<"${RECV_OUTPUT}" | wc -l | tr -d ' ')" -ne 1 ]]
+then
+  echo "[-] Expected exactly one 'first' in output"
+  exit 1
+fi
+if [[ "$(grep -o "second" <<<"${RECV_OUTPUT}" | wc -l | tr -d ' ')" -ne 1 ]]
+then
+  echo "[-] Expected exactly one 'second' in output"
   exit 1
 fi
 
-# Ensure "second" appears *after* "first"
-if ! awk '/first/{f=1} f && /second/{exit 0} END{exit 1}' <<<"$RECV_OUTPUT"; then
-  echo "[-] second did not appear after first!"
-  echo "$RECV_OUTPUT"
+# Ensure 'second' appears before 'first' for true out-of-order arrival
+if ! awk '
+    /second/ { pos2 = NR }
+    /first/  { pos1 = NR }
+    END { exit !(pos2 && pos1 && pos2 < pos1) }
+  ' <<<"${RECV_OUTPUT}"; then
+  echo "[-] Out-of-order handling failed (no ''second'' before ''first'')"
   exit 1
 fi
 

@@ -1,23 +1,68 @@
-// Implements an in-memory HTTP relay for prekey bundles and encrypted messages.
-// Development build with verbose request and handler logging.
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"log/slog"
+	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"github.com/spf13/pflag"
 
 	"ciphera/internal/domain"
 )
 
+// --- Flags ---
+
+var (
+	port          int  // listen port
+	enableLogging bool // logging toggle
+)
+
+// --- Constants ---
+
+// Networking and server limits.
+const (
+	defaultPort    = 8080
+	minPort        = 0
+	maxPort        = 65535
+	readHeaderTO   = 5 * time.Second
+	readTO         = 10 * time.Second
+	writeTO        = 10 * time.Second
+	idleTO         = 60 * time.Second
+	maxRequestBody = 1 << 20 // 1 MiB cap for incoming JSON bodies
+)
+
+// Relay policy limits.
+const (
+	maxPerUserQueue = 1000             // cap messages kept per user
+	maxCipherBytes  = 64 << 10         // 64 KiB max cipher payload
+	maxOneTimeKeys  = 500              // max one-time prekeys in a bundle
+	maxFutureSkew   = 10 * time.Minute // reject timestamps too far in the future
+)
+
+// Context key for request ID.
+type ctxKey string
+
+const ctxKeyReqID ctxKey = "reqid"
+
+// --- Types & Constructors ---
+
 // state holds registered prekey bundles and per-user message queues.
 type state struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	bundles map[string]domain.PrekeyBundle
 	queues  map[string][]domain.Envelope
 }
@@ -37,14 +82,78 @@ type loggingResponseWriter struct {
 	bytes  int
 }
 
+// --- Middleware ---
+
+// withRecover wraps a handler to convert panics into 500 responses.
+func withRecover(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				writeErr(w, http.StatusInternalServerError, "internal error")
+				if enableLogging {
+					slog.Error("panic", "err", rec)
+				}
+			}
+		}()
+		h(w, r)
+	}
+}
+
+// withReqID ensures each request has an ID for tracing.
+func withReqID(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-Id")
+		if id == "" {
+			id = genReqID()
+		}
+		w.Header().Set("X-Request-Id", id)
+		ctx := context.WithValue(r.Context(), ctxKeyReqID, id)
+		h(w, r.WithContext(ctx))
+	}
+}
+
+// withLogging logs method, path, remote, status, bytes, duration and request ID.
+func withLogging(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !enableLogging {
+			h(w, r)
+			return
+		}
+		start := time.Now()
+		lrw := &loggingResponseWriter{ResponseWriter: w}
+		h(lrw, r)
+		reqID := requestIDFromCtx(r.Context())
+		slog.Info("access",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"remote", clientIP(r),
+			"status", lrw.status,
+			"bytes", lrw.bytes,
+			"dur", time.Since(start),
+			"reqid", reqID,
+		)
+	}
+}
+
+// chain composes middlewares in order.
+func chain(h http.HandlerFunc, mws ...func(http.HandlerFunc) http.HandlerFunc) http.HandlerFunc {
+	for i := len(mws) - 1; i >= 0; i-- {
+		h = mws[i](h)
+	}
+	return h
+}
+
+// --- Utilities ---
+
+// WriteHeader records the status code then forwards to the underlying writer.
 func (lrw *loggingResponseWriter) WriteHeader(code int) {
 	lrw.status = code
 	lrw.ResponseWriter.WriteHeader(code)
 }
 
+// Write records the bytes written and defaults status to 200 if unset.
 func (lrw *loggingResponseWriter) Write(p []byte) (int, error) {
 	if lrw.status == 0 {
-		// If Write is called before WriteHeader, status is 200 by default.
 		lrw.status = http.StatusOK
 	}
 	n, err := lrw.ResponseWriter.Write(p)
@@ -52,181 +161,33 @@ func (lrw *loggingResponseWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// withLogging wraps a handler to log method, path, remote, status, bytes, and duration.
-func withLogging(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		lrw := &loggingResponseWriter{ResponseWriter: w}
-		h(lrw, r)
-		dur := time.Since(start)
-		log.Printf(`Access: method=%s path=%s remote=%s status=%d bytes=%d dur=%s`,
-			r.Method, r.URL.Path, r.RemoteAddr, lrw.status, lrw.bytes, dur)
+// isZero32 checks whether a 32-byte slice is all zeros in constant time.
+func isZero32(b []byte) bool {
+	if len(b) != 32 {
+		return false
+	}
+	var zero [32]byte
+	return subtle.ConstantTimeCompare(b, zero[:]) == 1
+}
+
+// writeJSON encodes v as JSON with no HTML escaping.
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		// Best effort error path.
+		http.Error(w, fmt.Sprintf("encode error: %v", err), http.StatusInternalServerError)
 	}
 }
 
-func main() {
-	s := newState()
-	mux := http.NewServeMux()
-
-	// Register HTTP endpoints.
-	mux.HandleFunc("/register", withLogging(s.handleRegister)) // POST /register
-	mux.HandleFunc("/prekey/", withLogging(s.handleGetPrekey)) // GET  /prekey/{username}
-	mux.HandleFunc("/msg/", withLogging(s.handleMsg))          // POST /msg/{user}, GET /msg/{user}, POST /msg/{user}/ack
-
-	addr := ":8080"
-	log.Printf("Relay listening on http://%s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("Relay failed: %v", err)
-	}
-}
-
-// handleRegister stores an incoming PrekeyBundle (POST /register).
-func (s *state) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var bundle domain.PrekeyBundle
-	if err := json.NewDecoder(r.Body).Decode(&bundle); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	if bundle.Username == "" {
-		http.Error(w, "username required", http.StatusBadRequest)
-		return
-	}
-
-	s.mu.Lock()
-	s.bundles[bundle.Username] = bundle
-	s.mu.Unlock()
-
-	log.Printf("Register: user=%q identity_key_set=%t sign_key_set=%t spk_id=%q one_time_count=%d",
-		bundle.Username,
-		!isZero32(bundle.IdentityKey[:]),
-		!isZero32(bundle.SignKey[:]),
-		bundle.SPKID,
-		len(bundle.OneTime),
-	)
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleGetPrekey returns a stored PrekeyBundle (GET /prekey/{username}).
-func (s *state) handleGetPrekey(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	username := strings.TrimPrefix(r.URL.Path, "/prekey/")
-	if username == "" {
-		http.Error(w, "username required", http.StatusBadRequest)
-		return
-	}
-
-	s.mu.Lock()
-	bundle, ok := s.bundles[username]
-	s.mu.Unlock()
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-
-	log.Printf("Prekey fetch: user=%q spk_id=%q one_time_count=%d",
-		username, bundle.SPKID, len(bundle.OneTime))
-	writeJSON(w, bundle)
-}
-
-// handleMsg handles three routes under /msg/:
-//   - POST /msg/{user}         enqueue a new Envelope
-//   - GET  /msg/{user}?limit=N fetch up to N queued Envelopes
-//   - POST /msg/{user}/ack     acknowledge and drop N messages
-func (s *state) handleMsg(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/msg/")
-	if path == "" {
-		http.Error(w, "user required", http.StatusBadRequest)
-		return
-	}
-
-	// Acknowledgement: POST /msg/{user}/ack { "count": N }
-	if strings.HasSuffix(path, "/ack") && r.Method == http.MethodPost {
-		user := strings.TrimSuffix(path, "/ack")
-		var ack struct {
-			Count int `json:"count"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&ack); err != nil || ack.Count < 0 {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-
-		s.mu.Lock()
-		queue := s.queues[user]
-		if ack.Count > len(queue) {
-			ack.Count = len(queue)
-		}
-		s.queues[user] = queue[ack.Count:]
-		remaining := len(s.queues[user])
-		s.mu.Unlock()
-
-		log.Printf("ACK: user=%q drop=%d remaining=%d", user, ack.Count, remaining)
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodPost:
-		// Enqueue new message: POST /msg/{user}
-		user := path
-		var env domain.Envelope
-		if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		// Enforce explicit recipient field
-		if env.To == "" {
-			http.Error(w, "recipient required", http.StatusBadRequest)
-			return
-		}
-		// If sender omitted timestamp, assign now
-		if env.Timestamp == 0 {
-			env.Timestamp = time.Now().Unix()
-		}
-
-		s.mu.Lock()
-		s.queues[user] = append(s.queues[user], env)
-		qLen := len(s.queues[user])
-		s.mu.Unlock()
-
-		hasPrekey := env.Prekey != nil
-		cipherLen := len(env.Cipher)
-		log.Printf("Enqueue: to_user=%q from=%q to=%q cipher_bytes=%d has_prekey=%t queue_len_now=%d",
-			user, env.From, env.To, cipherLen, hasPrekey, qLen)
-
-		w.WriteHeader(http.StatusNoContent)
-
-	case http.MethodGet:
-		// Fetch messages: GET /msg/{user}?limit=N
-		user := path
-		limit, err := parseLimit(r.URL.Query().Get("limit"))
-		if err != nil {
-			http.Error(w, "bad limit", http.StatusBadRequest)
-			return
-		}
-
-		s.mu.Lock()
-		queue := s.queues[user]
-		s.mu.Unlock()
-
-		if limit == 0 || limit > len(queue) {
-			limit = len(queue)
-		}
-		log.Printf("Fetch: user=%q limit=%d available=%d", user, limit, len(queue))
-		writeJSON(w, queue[:limit])
-
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
+// writeErr writes a JSON error object with a given status code.
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // parseLimit parses the optional "limit" query parameter.
@@ -241,24 +202,315 @@ func parseLimit(v string) (int, error) {
 	return n, nil
 }
 
-// writeJSON encodes v as JSON with no HTML escaping.
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		http.Error(w, fmt.Sprintf("encode error: %v", err), http.StatusInternalServerError)
+// clientIP extracts the client IP from headers or RemoteAddr.
+func clientIP(r *http.Request) string {
+	// Respect common proxy headers. This is best-effort.
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// First hop is the client.
+		if i := indexByte(xff, ','); i >= 0 {
+			return trimSpace(xff[:i])
+		}
+		return trimSpace(xff)
+	}
+	if xr := r.Header.Get("X-Real-IP"); xr != "" {
+		return xr
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// requestIDFromCtx returns the request ID if present.
+func requestIDFromCtx(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeyReqID).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// genReqID creates a simple 128-bit random hex ID.
+func genReqID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback to timestamp based if rand fails.
+		return fmt.Sprintf("req-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// Small helpers without extra imports.
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+func trimSpace(s string) string {
+	// Minimal trim to avoid extra import.
+	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
+		s = s[1:]
+	}
+	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+// --- Handlers ---
+
+// handleRegister stores an incoming PrekeyBundle (POST /register).
+func (s *state) handleRegister(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	var bundle domain.PrekeyBundle
+	if err := dec.Decode(&bundle); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if bundle.Username == "" {
+		writeErr(w, http.StatusBadRequest, "username required")
+		return
+	}
+	if len(bundle.OneTime) > maxOneTimeKeys {
+		writeErr(w, http.StatusRequestEntityTooLarge, "too many one-time keys")
+		return
+	}
+
+	s.mu.Lock()
+	s.bundles[bundle.Username] = bundle
+	s.mu.Unlock()
+
+	if enableLogging {
+		slog.Info("register",
+			"user", bundle.Username,
+			"identity_key_set", !isZero32(bundle.IdentityKey[:]),
+			"sign_key_set", !isZero32(bundle.SignKey[:]),
+			"spk_id", bundle.SPKID,
+			"one_time_count", len(bundle.OneTime),
+			"reqid", requestIDFromCtx(r.Context()),
+		)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGet returns a stored PrekeyBundle (GET /prekey/{username}).
+func (s *state) handleGet(w http.ResponseWriter, r *http.Request) {
+	username := r.PathValue("username")
+	if username == "" {
+		writeErr(w, http.StatusBadRequest, "username required")
+		return
+	}
+
+	s.mu.RLock()
+	bundle, ok := s.bundles[username]
+	s.mu.RUnlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	if enableLogging {
+		slog.Info(
+			"prekey_fetch",
+			"user", username,
+			"spk_id", bundle.SPKID,
+			"one_time_count", len(bundle.OneTime),
+			"reqid", requestIDFromCtx(r.Context()),
+		)
+	}
+	writeJSON(w, bundle)
+}
+
+// handleEnqueue enqueues a new Envelope (POST /msg/{user}).
+func (s *state) handleEnqueue(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+
+	user := r.PathValue("user")
+
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	var env domain.Envelope
+	if err := dec.Decode(&env); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if env.To == "" {
+		writeErr(w, http.StatusBadRequest, "recipient required")
+		return
+	}
+	// Prevent route and payload mismatch.
+	if user == "" || user != env.To {
+		writeErr(w, http.StatusBadRequest, "recipient mismatch")
+		return
+	}
+	// Basic payload caps and sanity checks.
+	if len(env.Cipher) > maxCipherBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, "cipher too large")
+		return
+	}
+	if env.Timestamp == 0 {
+		env.Timestamp = time.Now().Unix()
+	} else {
+		now := time.Now()
+		ts := time.Unix(env.Timestamp, 0)
+		if ts.After(now.Add(maxFutureSkew)) {
+			writeErr(w, http.StatusBadRequest, "timestamp in future")
+			return
+		}
+	}
+
+	// Append with per-user queue cap, drop oldest if needed.
+	s.mu.Lock()
+	q := append(s.queues[user], env)
+	if len(q) > maxPerUserQueue {
+		q = q[len(q)-maxPerUserQueue:]
+	}
+	s.queues[user] = q
+	qLen := len(q)
+	s.mu.Unlock()
+
+	if enableLogging {
+		slog.Info("enqueue",
+			"queue_user", user,
+			"from", env.From,
+			"to", env.To,
+			"cipher_bytes", len(env.Cipher),
+			"has_prekey", env.Prekey != nil,
+			"queue_len", qLen,
+			"reqid", requestIDFromCtx(r.Context()),
+		)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleFetch fetches queued Envelopes (GET /msg/{user}?limit=N).
+func (s *state) handleFetch(w http.ResponseWriter, r *http.Request) {
+	user := r.PathValue("user")
+
+	limit, err := parseLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad limit")
+		return
+	}
+
+	// Copy under lock to avoid races with concurrent enqueue/ack.
+	s.mu.RLock()
+	queue := s.queues[user]
+	if limit == 0 || limit > len(queue) {
+		limit = len(queue)
+	}
+	out := make([]domain.Envelope, limit)
+	copy(out, queue[:limit])
+	available := len(queue)
+	s.mu.RUnlock()
+
+	writeJSON(w, out)
+
+	if enableLogging {
+		slog.Info("fetch", "user", user, "limit", limit, "available", available, "reqid", requestIDFromCtx(r.Context()))
 	}
 }
 
-// isZero32 checks whether a 32-byte slice is all zeros.
-func isZero32(b []byte) bool {
-	if len(b) != 32 {
-		return false
+// handleAck acknowledges and drops N messages (POST /msg/{user}/ack).
+func (s *state) handleAck(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+
+	user := r.PathValue("user")
+
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	var ack struct {
+		Count int `json:"count"`
 	}
-	var acc byte
-	for _, x := range b {
-		acc |= x
+	if err := dec.Decode(&ack); err != nil || ack.Count < 0 {
+		writeErr(w, http.StatusBadRequest, "bad request")
+		return
 	}
-	return acc == 0
+
+	s.mu.Lock()
+	if ack.Count > len(s.queues[user]) {
+		ack.Count = len(s.queues[user])
+	}
+	s.queues[user] = s.queues[user][ack.Count:]
+	remaining := len(s.queues[user])
+	s.mu.Unlock()
+
+	if enableLogging {
+		slog.Info("ack", "user", user, "drop", ack.Count, "remaining", remaining, "reqid", requestIDFromCtx(r.Context()))
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Main ---
+
+// main starts the HTTP server and registers handlers.
+func main() {
+	pflag.IntVarP(&port, "port", "p", defaultPort, "port to listen on")
+	pflag.BoolVar(&enableLogging, "log", false, "enable access logging")
+	pflag.Parse()
+
+	if port <= minPort || port > maxPort {
+		port = defaultPort
+	}
+
+	logger := slog.New(
+		slog.NewTextHandler(log.Writer(), &slog.HandlerOptions{Level: slog.LevelInfo}),
+	)
+	slog.SetDefault(logger)
+
+	s := newState()
+	mux := http.NewServeMux()
+
+	// Register HTTP endpoints. Middlewares: recover -> reqid -> logging -> handler
+	mux.HandleFunc("POST /register", chain(s.handleRegister, withRecover, withReqID, withLogging))    // POST /register
+	mux.HandleFunc("GET /prekey/{username}", chain(s.handleGet, withRecover, withReqID, withLogging)) // GET  /prekey/{username}
+	mux.HandleFunc("POST /msg/{user}", chain(s.handleEnqueue, withRecover, withReqID, withLogging))   // POST /msg/{user}
+	mux.HandleFunc("GET /msg/{user}", chain(s.handleFetch, withRecover, withReqID, withLogging))      // GET  /msg/{user}
+	mux.HandleFunc("POST /msg/{user}/ack", chain(s.handleAck, withRecover, withReqID, withLogging))   // POST /msg/{user}/ack
+
+	// Simple health check for readiness/liveness probes.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           mux,
+		ReadHeaderTimeout: readHeaderTO,
+		ReadTimeout:       readTO,
+		WriteTimeout:      writeTO,
+		IdleTimeout:       idleTO,
+	}
+
+	// Graceful shutdown.
+	go func() {
+		slog.Info("Relay listening", "addr", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Relay failed", "error", err)
+		}
+	}()
+
+	// Wait for interrupt or terminate signal.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+
+	slog.Info("Shutting down")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("Graceful shutdown failed", "error", err)
+	}
 }

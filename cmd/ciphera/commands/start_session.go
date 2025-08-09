@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// startSessionCmd performs the X3DH handshake against a peer’s prekey bundle and persists a new
+// startSessionCmd performs the X3DH handshake against a peer's prekey bundle and persists a new
 // session for future messaging.
 func startSessionCmd() *cobra.Command {
 	return &cobra.Command{
@@ -16,14 +16,15 @@ func startSessionCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			peer := args[0]
 
-			// Initiate handshake and store session state
-			sess, err := appCtx.Sessions.Initiate(passphrase, peer)
+			// Initiate handshake and store session state.
+			_, err := appCtx.SessionService.InitiateSession(cmd.Context(), passphrase, peer)
 			if err != nil {
 				return fmt.Errorf("starting session with %q: %w", peer, err)
 			}
 
-			// Print the root key so users know it succeeded
-			fmt.Printf("Session created with %s. RootKey=%x\n", peer, sess.RootKey)
+			// Print confirmation only (do not leak secret material).
+			fmt.Printf("Session created with %s\n", peer)
+
 			return nil
 		},
 	}

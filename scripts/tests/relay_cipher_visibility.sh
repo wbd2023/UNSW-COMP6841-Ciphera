@@ -6,8 +6,8 @@ ALICE_HOME="/tmp/alice-ciphera-vis-alice"
 BOB_HOME="/tmp/bob-ciphera-vis-bob"
 ALICE_USER="alice"
 BOB_USER="bob"
-ALICE_PASS="alice-pass"
-BOB_PASS="bob-pass"
+ALICE_PASS="Alice-pass1234"
+BOB_PASS="Bob-pass1234"
 SECRET_MSG="this-should-not-appear-on-the-relay"
 
 ROOT_DIR="$(

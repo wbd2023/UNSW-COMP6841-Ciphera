@@ -6,8 +6,8 @@ ALICE_HOME="/tmp/alice-ciphera-t2-alice"
 BOB_HOME="/tmp/bob-ciphera-t2-bob"
 ALICE_USER="alice"
 BOB_USER="bob"
-ALICE_PASS="alice-pass"
-BOB_PASS="bob-pass"
+ALICE_PASS="Alice-pass1234"
+BOB_PASS="Bob-pass1234"
 MSG="integrity-check"
 
 ROOT_DIR="$(

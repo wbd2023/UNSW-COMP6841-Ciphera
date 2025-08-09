@@ -46,4 +46,5 @@ func (s *RatchetFileStore) LoadConversation(peer string) (domain.Conversation, b
 	return c, ok, nil
 }
 
+// Compile-time assertion that RatchetFileStore implements domain.RatchetStore.
 var _ domain.RatchetStore = (*RatchetFileStore)(nil)

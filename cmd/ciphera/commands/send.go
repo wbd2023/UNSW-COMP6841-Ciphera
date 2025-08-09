@@ -16,8 +16,9 @@ func sendCmd() *cobra.Command {
 			peer := args[0]
 			msg := []byte(args[1])
 
-			// Handles unlocking keys, ratcheting state, HTTP post, etc.
-			if err := appCtx.Messages.Send(passphrase, username, peer, msg); err != nil {
+			// Handles unlocking keys, ratchet state, and HTTP post via appCtx.
+			err := appCtx.MessageService.SendMessage(cmd.Context(), passphrase, username, peer, msg)
+			if err != nil {
 				return fmt.Errorf("sending message to %q: %w", peer, err)
 			}
 
@@ -26,8 +27,14 @@ func sendCmd() *cobra.Command {
 		},
 	}
 
-	// Username flag is local to this command (others inherit from the root)
-	cmd.Flags().StringVarP(&username, "username", "u", "", "your registered username")
+	// Username flag is local to this command (others inherit from the root).
+	cmd.Flags().StringVarP(
+		&username,
+		"username",
+		"u",
+		"",
+		"your registered username",
+	)
 	_ = cmd.MarkFlagRequired("username")
 
 	return cmd

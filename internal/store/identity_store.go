@@ -62,4 +62,5 @@ func (s *IdentityFileStore) LoadIdentity(passphrase string) (domain.Identity, er
 	return id, nil
 }
 
+// Compile-time assertion that IdentityFileStore implements domain.IdentityStore.
 var _ domain.IdentityStore = (*IdentityFileStore)(nil)

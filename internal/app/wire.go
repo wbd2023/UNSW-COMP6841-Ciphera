@@ -5,6 +5,7 @@ import (
 
 	"ciphera/internal/domain"
 	"ciphera/internal/relay"
+	identitysvc "ciphera/internal/services/identity"
 	messagesvc "ciphera/internal/services/message"
 	prekeysvc "ciphera/internal/services/prekey"
 	sessionsvc "ciphera/internal/services/session"
@@ -13,43 +14,44 @@ import (
 
 // Wire bundles all stores, services, and clients for the CLI.
 type Wire struct {
-	Identity domain.IdentityStore
-	Prekey   domain.PrekeyService
-	Sessions domain.SessionService
-	Messages domain.MessageService
-	Relay    domain.RelayClient
-	HTTP     *http.Client
+	IdentityService domain.IdentityService
+	PrekeyService   domain.PrekeyService
+	SessionService  domain.SessionService
+	MessageService  domain.MessageService
+	RelayClient     domain.RelayClient
+	HTTPClient      *http.Client
 }
 
 // NewWire constructs the dependency graph from cfg.
 func NewWire(cfg Config) (*Wire, error) {
 	// File-based stores
-	identityStore := store.NewIdentityFileStore(cfg.Home)
-	prekeyStore := store.NewPrekeyFileStore(cfg.Home)
-	bundleStore := store.NewBundleFileStore(cfg.Home)
-	sessionStore := store.NewSessionFileStore(cfg.Home)
-	ratchetStore := store.NewRatchetFileStore(cfg.Home)
+	idStore := store.NewIdentityFileStore(cfg.HomeDir)
+	prekeyStore := store.NewPrekeyFileStore(cfg.HomeDir)
+	bundleStore := store.NewBundleFileStore(cfg.HomeDir)
+	sessionStore := store.NewSessionFileStore(cfg.HomeDir)
+	ratchetStore := store.NewRatchetFileStore(cfg.HomeDir)
 
 	// Ensure an HTTP client is available for outbound calls
-	httpClient := cfg.HTTP
+	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
 
 	// Relay client (uses provided HTTP client)
-	rc := relay.NewHTTP(cfg.RelayURL, httpClient)
+	relayClient := relay.NewHTTP(cfg.RelayURL, httpClient)
 
 	// High-level services
-	prekeySvc := prekeysvc.New(identityStore, prekeyStore, bundleStore)
-	sessionSvc := sessionsvc.New(identityStore, bundleStore, rc, sessionStore)
-	messageSvc := messagesvc.New(identityStore, prekeyStore, sessionSvc, ratchetStore, rc)
+	idSvc := identitysvc.New(idStore)
+	prekeySvc := prekeysvc.New(idStore, prekeyStore, bundleStore)
+	sessionSvc := sessionsvc.New(idStore, bundleStore, sessionStore, relayClient)
+	messageSvc := messagesvc.New(idStore, prekeyStore, ratchetStore, sessionSvc, relayClient)
 
 	return &Wire{
-		Identity: identityStore,
-		Prekey:   prekeySvc,
-		Sessions: sessionSvc,
-		Messages: messageSvc,
-		Relay:    rc,
-		HTTP:     httpClient,
+		IdentityService: idSvc,
+		PrekeyService:   prekeySvc,
+		SessionService:  sessionSvc,
+		MessageService:  messageSvc,
+		RelayClient:     relayClient,
+		HTTPClient:      httpClient,
 	}, nil
 }

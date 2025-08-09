@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"time"
 
 	"ciphera/internal/domain"
@@ -8,40 +9,71 @@ import (
 )
 
 // Service performs X3DH initiation and persists sessions.
+//
+// A session represents the shared root key and associated metadata needed
+// for establishing a Double Ratchet conversation with a peer.
+// This service handles:
+//   - Retrieving our own identity keys.
+//   - Fetching the peer's prekey bundle from the relay.
+//   - Running the X3DH key agreement as the initiator.
+//   - Persisting the resulting session for later message encryption.
 type Service struct {
-	ids   domain.IdentityStore
-	pks   domain.PrekeyBundleStore
-	relay domain.RelayClient
-	store domain.SessionStore
+	idStore      domain.IdentityStore
+	prekeyStore  domain.PrekeyBundleStore
+	sessionStore domain.SessionStore
+	relayClient  domain.RelayClient
 }
 
 // New constructs a Session Service with the given stores and relay client.
 func New(
-	ids domain.IdentityStore,
-	pks domain.PrekeyBundleStore,
-	relay domain.RelayClient,
-	store domain.SessionStore,
+	idStore domain.IdentityStore,
+	prekeyStore domain.PrekeyBundleStore,
+	sessionStore domain.SessionStore,
+	relayClient domain.RelayClient,
 ) *Service {
-	return &Service{ids: ids, pks: pks, relay: relay, store: store}
+	return &Service{
+		idStore:      idStore,
+		prekeyStore:  prekeyStore,
+		sessionStore: sessionStore,
+		relayClient:  relayClient,
+	}
 }
 
-// Initiate runs X3DH against the peer's bundle and stores the resulting session.
-func (s *Service) Initiate(passphrase, peer string) (domain.Session, error) {
-	id, err := s.ids.LoadIdentity(passphrase)
+// Initiate runs X3DH against the peer's prekey bundle and stores the resulting session.
+//
+// Steps:
+//  1. Load our own identity key pair from the identity store.
+//  2. Fetch the peer's prekey bundle from the relay (contains identity key,
+//     signed prekey, and optionally a one-time prekey).
+//  3. Run X3DH as the initiator to derive the root key and record which prekeys
+//     were used.
+//  4. Create a Session record and persist it to the session store for future
+//     message exchanges.
+func (s *Service) InitiateSession(
+	ctx context.Context,
+	passphrase string,
+	peer string,
+) (domain.Session, error) {
+	// Load our identity from secure storage.
+	id, err := s.idStore.LoadIdentity(passphrase)
 	if err != nil {
 		return domain.Session{}, err
 	}
 
-	bundle, err := s.relay.FetchPrekeyBundle(peer)
+	// Get the peer's current prekey bundle from the relay.
+	bundle, err := s.relayClient.FetchPrekeyBundle(ctx, peer)
 	if err != nil {
 		return domain.Session{}, err
 	}
 
+	// Perform X3DH as the initiator to derive the shared root key and identify
+	// which SPK/OPK were used.
 	rk, spkID, opkID, ephPub, err := x3dh.InitiatorRoot(id, bundle)
 	if err != nil {
 		return domain.Session{}, err
 	}
 
+	// Build the session record.
 	sess := domain.Session{
 		Peer:        peer,
 		RootKey:     rk,
@@ -53,15 +85,17 @@ func (s *Service) Initiate(passphrase, peer string) (domain.Session, error) {
 		InitiatorEK: ephPub,
 	}
 
-	if err := s.store.SaveSession(peer, sess); err != nil {
+	// Persist the session for later retrieval.
+	if err := s.sessionStore.SaveSession(peer, sess); err != nil {
 		return domain.Session{}, err
 	}
 	return sess, nil
 }
 
-// Get retrieves a stored session for the given peer.
-func (s *Service) Get(peer string) (domain.Session, bool, error) {
-	return s.store.LoadSession(peer)
+// Get retrieves a stored session for the given peer from the session store.
+func (s *Service) GetSession(peer string) (domain.Session, bool, error) {
+	return s.sessionStore.LoadSession(peer)
 }
 
+// Compile-time assertion that Service implements domain.SessionService.
 var _ domain.SessionService = (*Service)(nil)

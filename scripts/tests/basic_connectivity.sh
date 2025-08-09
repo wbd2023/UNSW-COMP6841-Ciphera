@@ -16,7 +16,7 @@ ROOT_DIR="$(
 BIN_DIR="${ROOT_DIR}/bin"
 CIPHERA_BIN="${BIN_DIR}/ciphera"
 RELAY_BIN="${BIN_DIR}/relay"
-RELAY_LOG="/tmp/ciphera-relay-basic.log"
+RELAY_LOG="/tmp/ciphera-relay-test-basic-connectivity.log"
 
 cleanup() {
   if [[ -n "${RELAY_PID:-}" ]]; then

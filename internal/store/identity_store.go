@@ -37,7 +37,7 @@ func (s *IdentityFileStore) SaveIdentity(passphrase string, id domain.Identity) 
 		return err
 	}
 	path := filepath.Join(s.dir, idFilename)
-	return os.WriteFile(path, ct, 0o600)
+	return writeFile(path, ct, 0o600)
 }
 
 // LoadIdentity reads and decrypts the identity.

@@ -1,125 +1,80 @@
 package domain
 
-import "encoding/json"
-
 // X25519Public is a Curve25519 public key.
 type X25519Public [32]byte
 
+// Slice returns the key as a []byte.
 func (p X25519Public) Slice() []byte { return p[:] }
 
 // X25519Private is a Curve25519 private key.
 type X25519Private [32]byte
 
+// Slice returns the key as a []byte.
 func (k X25519Private) Slice() []byte { return k[:] }
 
-// Ed25519Public is a signing public key.
+// Ed25519Public is an Ed25519 signing public key.
 type Ed25519Public [32]byte
 
+// Slice returns the key as a []byte.
 func (p Ed25519Public) Slice() []byte { return p[:] }
 
-// Ed25519Private is a signing private key (ed25519.PrivateKey layout).
+// Ed25519Private is an Ed25519 signing private key.
 type Ed25519Private [64]byte
 
+// Slice returns the key as a []byte.
 func (k Ed25519Private) Slice() []byte { return k[:] }
 
-// Identity holds long-term keys stored locally.
+// Identity holds your long-term X25519 and Ed25519 keys.
 type Identity struct {
-	XPub   X25519Public
-	XPriv  X25519Private
-	EdPub  Ed25519Public
-	EdPriv Ed25519Private
+	XPub   X25519Public   `json:"xpub"`
+	XPriv  X25519Private  `json:"xpriv"`
+	EdPub  Ed25519Public  `json:"edpub"`
+	EdPriv Ed25519Private `json:"edpriv"`
 }
 
-// OneTimePub is a published one-time prekey (public only) with an ID.
+// OneTimePair is the full (private+public) one-time prekey stored locally.
+type OneTimePair struct {
+	ID   string        `json:"id"`
+	Priv X25519Private `json:"priv"`
+	Pub  X25519Public  `json:"pub"`
+}
+
+// OneTimePub is only the public half (sent in bundles).
 type OneTimePub struct {
-	ID  string
-	Pub X25519Public
+	ID  string       `json:"id"`
+	Pub X25519Public `json:"pub"`
 }
 
-// PrekeyBundle is served by the relay. IDs allow initiators to reference SPK/OPK.
+// PrekeyBundle is the set of public keys you register with the relay.
+// SignedPrekeySig is base64-encoded automatically.
 type PrekeyBundle struct {
-	Username        string
-	IdentityKey     X25519Public
-	SignKey         Ed25519Public
-	SPKID           string
-	SignedPrekey    X25519Public
-	SignedPrekeySig []byte
-	OneTime         []OneTimePub // optional
+	Username        string        `json:"username"`
+	IdentityKey     X25519Public  `json:"identity_key"`
+	SignKey         Ed25519Public `json:"sign_key"`
+	SPKID           string        `json:"spk_id"`
+	SignedPrekey    X25519Public  `json:"signed_prekey"`
+	SignedPrekeySig []byte        `json:"signed_prekey_sig"`
+	OneTime         []OneTimePub  `json:"one_time,omitempty"`
 }
 
-// MarshalJSON encodes fixed arrays as arrays for stable JSON.
-func (b PrekeyBundle) MarshalJSON() ([]byte, error) {
-	type pub = [32]byte
-	type alias PrekeyBundle
-	type one struct {
-		ID  string `json:"id"`
-		Pub pub    `json:"pub"`
-	}
-	aux := struct {
-		alias
-		IdentityKey pub   `json:"identity_key"`
-		SignKey     pub   `json:"sign_key"`
-		SignedPK    pub   `json:"signed_prekey"`
-		OneTime     []one `json:"one_time,omitempty"`
-	}{
-		alias:       (alias)(b),
-		IdentityKey: b.IdentityKey,
-		SignKey:     b.SignKey,
-		SignedPK:    b.SignedPrekey,
-		OneTime:     make([]one, len(b.OneTime)),
-	}
-	for i := range b.OneTime {
-		aux.OneTime[i] = one{ID: b.OneTime[i].ID, Pub: b.OneTime[i].Pub}
-	}
-	return json.Marshal(aux)
-}
-
-// UnmarshalJSON mirrors MarshalJSON.
-func (b *PrekeyBundle) UnmarshalJSON(data []byte) error {
-	type pub = [32]byte
-	type alias PrekeyBundle
-	type one struct {
-		ID  string `json:"id"`
-		Pub pub    `json:"pub"`
-	}
-	aux := struct {
-		alias
-		IdentityKey pub   `json:"identity_key"`
-		SignKey     pub   `json:"sign_key"`
-		SignedPK    pub   `json:"signed_prekey"`
-		OneTime     []one `json:"one_time,omitempty"`
-	}{}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	*b = (PrekeyBundle)(aux.alias)
-	b.IdentityKey = aux.IdentityKey
-	b.SignKey = aux.SignKey
-	b.SignedPrekey = aux.SignedPK
-	b.OneTime = make([]OneTimePub, len(aux.OneTime))
-	for i := range aux.OneTime {
-		b.OneTime[i] = OneTimePub{ID: aux.OneTime[i].ID, Pub: aux.OneTime[i].Pub}
-	}
-	return nil
-}
-
-// RatchetHeader accompanies each ciphertext.
-type RatchetHeader struct {
-	DHPub []byte // 32 bytes
-	PN    uint32
-	N     uint32
-}
-
-// PrekeyMessage is attached to the first message from the initiator.
+// PrekeyMessage carries the X3DH handshake parameters in your first
+// message envelope.
 type PrekeyMessage struct {
-	InitiatorIK   X25519Public // IK_A
-	Ephemeral     X25519Public // EK_A
-	SPKID         string
-	OPKID         string // optional
-	TranscriptSHA []byte `json:",omitempty"` // optional transcript binding
+	InitiatorIK   X25519Public `json:"initiator_ik"`
+	Ephemeral     X25519Public `json:"ephemeral"`
+	SPKID         string       `json:"spk_id"`
+	OPKID         string       `json:"opk_id,omitempty"`
+	TranscriptSHA []byte       `json:"transcript_sha,omitempty"`
 }
 
-// Envelope is the wire message via relay.
+// RatchetHeader is sent alongside every ciphertext.
+type RatchetHeader struct {
+	DHPub []byte `json:"dh_pub"`
+	PN    uint32 `json:"pn"`
+	N     uint32 `json:"n"`
+}
+
+// Envelope is the wire-format message you post/get from the relay.
 type Envelope struct {
 	From      string         `json:"from"`
 	To        string         `json:"to"`
@@ -130,46 +85,42 @@ type Envelope struct {
 	Timestamp int64          `json:"timestamp"`
 }
 
-// Session is produced by X3DH; RootKey seeds Double Ratchet.
+// Session holds the X3DH-derived root key and metadata for a peer.
 type Session struct {
-	Peer       string
-	RootKey    []byte
-	PeerSPK    X25519Public
-	PeerIK     X25519Public
-	CreatedUTC int64
-
-	// X3DH parameters used by the initiator; echoed in the first PrekeyMessage.
-	SPKID       string
-	OPKID       string
-	InitiatorEK X25519Public
+	Peer        string       `json:"peer"`
+	RootKey     []byte       `json:"root_key"`
+	PeerSPK     X25519Public `json:"peer_spk"`
+	PeerIK      X25519Public `json:"peer_ik"`
+	CreatedUTC  int64        `json:"created_utc"`
+	SPKID       string       `json:"spk_id"`
+	OPKID       string       `json:"opk_id"`
+	InitiatorEK X25519Public `json:"initiator_ek"`
 }
 
-// DecryptedMessage is returned by MessageService.Recv.
-type DecryptedMessage struct {
-	From      string
-	To        string
-	Plaintext []byte
-	Timestamp int64
-}
-
-// Conversation stores per-peer ratchet state.
+// Conversation persists the ratchet state for a peer.
 type Conversation struct {
-	Peer  string
-	State RatchetState
+	Peer  string       `json:"peer"`
+	State RatchetState `json:"state"`
 }
 
-// RatchetState holds Double Ratchet state.
+// DecryptedMessage is what MessageService.Recv returns.
+type DecryptedMessage struct {
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Plaintext []byte `json:"plaintext"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+// RatchetState contains all fields the Double Ratchet needs to track.
 type RatchetState struct {
-	RootKey []byte
-	DHPriv  X25519Private
-	DHPub   X25519Public
-
-	PeerDHPub X25519Public
-
-	SendCK []byte
-	RecvCK []byte
-
-	Ns, Nr, PN uint32
-
-	Skipped map[string][]byte
+	RootKey   []byte            `json:"root_key"`
+	DHPriv    X25519Private     `json:"dh_priv"`
+	DHPub     X25519Public      `json:"dh_pub"`
+	PeerDHPub X25519Public      `json:"peer_dh_pub"`
+	SendCK    []byte            `json:"send_ck,omitempty"`
+	RecvCK    []byte            `json:"recv_ck,omitempty"`
+	Ns        uint32            `json:"ns"`
+	Nr        uint32            `json:"nr"`
+	PN        uint32            `json:"pn"`
+	Skipped   map[string][]byte `json:"skipped"`
 }

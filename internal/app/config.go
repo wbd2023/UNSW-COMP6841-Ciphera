@@ -1,10 +1,12 @@
 package app
 
-import "net/http"
+import (
+	"net/http"
+)
 
-// Config holds runtime wiring options for building the app.
+// Config holds settings for wiring up the application.
 type Config struct {
-	Home     string       // config directory, e.g. $HOME/.ciphera
-	RelayURL string       // relay base URL, e.g. http://127.0.0.1:8080
-	HTTP     *http.Client // optional; defaults to http.DefaultClient
+	HomeDir    string       // path to config directory
+	RelayURL   string       // base URL of the relay server
+	HTTPClient *http.Client // HTTP client (with timeouts) to use for network calls
 }

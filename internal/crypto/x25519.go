@@ -1,49 +1,43 @@
 package crypto
 
 import (
-    "crypto/rand"
-    "crypto/sha256"
-    "encoding/hex"
+	"crypto/rand"
+	"fmt"
 
-    "golang.org/x/crypto/curve25519"
+	"golang.org/x/crypto/curve25519"
 
-    "ciphera/internal/domain"
+	"ciphera/internal/domain"
 )
 
-// GenerateX25519 returns a fresh Curve25519 key pair.
-// The private key is clamped per RFC 7748.
+// GenerateX25519 generates a new X25519 keypair, clamping the private key per RFC7748 and
+// returning (priv, pub).
 func GenerateX25519() (priv domain.X25519Private, pub domain.X25519Public, err error) {
-    if _, err = rand.Read(priv[:]); err != nil {
-        return
-    }
-    clamp(&priv)
-    pb, err := curve25519.X25519(priv.Slice(), curve25519.Basepoint)
-    if err != nil {
-        return
-    }
-    copy(pub[:], pb)
-    return
+	if _, err = rand.Read(priv[:]); err != nil {
+		return priv, pub, fmt.Errorf("x25519: generate private key: %w", err)
+	}
+	ClampX25519PrivateKey(&priv)
+	pubBytes, err := curve25519.X25519(priv.Slice(), curve25519.Basepoint)
+	if err != nil {
+		return priv, pub, fmt.Errorf("x25519: compute public key: %w", err)
+	}
+	copy(pub[:], pubBytes)
+	return priv, pub, nil
 }
 
-// DH computes X25519 Diffie–Hellman.
-func DH(priv domain.X25519Private, pub domain.X25519Public) (out [32]byte, err error) {
-    secret, err := curve25519.X25519(priv.Slice(), pub.Slice())
-    if err != nil {
-        return out, err
-    }
-    copy(out[:], secret)
-    return out, nil
+// DH performs a Curve25519 Diffie–Hellman between priv and pub, returning a 32-byte shared secret.
+func DH(priv domain.X25519Private, pub domain.X25519Public) (shared [32]byte, err error) {
+	secret, err := curve25519.X25519(priv.Slice(), pub.Slice())
+	if err != nil {
+		return shared, fmt.Errorf("x25519: DH failed: %w", err)
+	}
+	copy(shared[:], secret)
+	return shared, nil
 }
 
-// FingerprintX25519 returns a short fingerprint of the public key.
-func FingerprintX25519(pub domain.X25519Public) string {
-    sum := sha256.Sum256(pub[:])
-    return hex.EncodeToString(sum[:10])
-}
-
-func clamp(k *domain.X25519Private) {
-    kb := k[:]
-    kb[0] &= 248
-    kb[31] &= 127
-    kb[31] |= 64
+// ClampX25519PrivateKey applies RFC7748 clamping to a 32-byte scalar in place.
+func ClampX25519PrivateKey(k *domain.X25519Private) {
+	kb := (*k)[:]
+	kb[0] &= 248
+	kb[31] &= 127
+	kb[31] |= 64
 }

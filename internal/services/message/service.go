@@ -1,6 +1,8 @@
 package message
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,39 +12,78 @@ import (
 )
 
 // Service sends and receives messages over the relay using Double Ratchet.
+//
+// High-level flow:
+//   - Send: if no conversation exists, include a PrekeyMessage so the receiver can
+//     bootstrap a session, then encrypt with Double Ratchet and post via the relay.
+//   - Receive: fetch envelopes, bootstrap a session if needed using the sender's
+//     PrekeyMessage, decrypt in order, persist ratchet state, then ack processed
+//     messages.
 type Service struct {
-	idStore  domain.IdentityStore
-	prekeys  domain.PrekeyStore
-	sessions domain.SessionService
-	rstore   domain.RatchetStore
-	relay    domain.RelayClient
+	idStore        domain.IdentityStore
+	prekeyStore    domain.PrekeyStore
+	ratchetStore   domain.RatchetStore
+	sessionService domain.SessionService
+	relayClient    domain.RelayClient
 }
 
-func New(ids domain.IdentityStore, ps domain.PrekeyStore, sess domain.SessionService, rs domain.RatchetStore, relay domain.RelayClient) *Service {
-	return &Service{idStore: ids, prekeys: ps, sessions: sess, rstore: rs, relay: relay}
-}
+var (
+	// ErrNoSession indicates there is no stored session with the peer.
+	ErrNoSession = errors.New("no session with peer; run Initiate first")
+)
 
-var _ domain.MessageService = (*Service)(nil)
+// New constructs a Message Service with the given stores and relay client.
+func New(
+	idStore domain.IdentityStore,
+	prekeyStore domain.PrekeyStore,
+	ratchetStore domain.RatchetStore,
+	sessionService domain.SessionService,
+	relayClient domain.RelayClient,
+) *Service {
+	return &Service{
+		idStore:        idStore,
+		prekeyStore:    prekeyStore,
+		ratchetStore:   ratchetStore,
+		sessionService: sessionService,
+		relayClient:    relayClient,
+	}
+}
 
 // Send encrypts and posts plaintext.
-// If no conversation exists, it initialises the initiator ratchet and includes a PrekeyMessage that
-// matches the stored X3DH initiation (EK/IDs) so the responder can derive the same root.
-func (s *Service) Send(passphrase, fromUsername, toUsername string, plaintext []byte) error {
-	sess, ok, err := s.sessions.Get(toUsername)
+//
+// If this is the first message to a peer (no stored conversation), a PrekeyMessage
+// is attached so the receiver can establish a Double Ratchet session using X3DH.
+// Subsequent messages omit PrekeyMessage and use the existing ratchet state.
+func (s *Service) SendMessage(
+	ctx context.Context,
+	passphrase string,
+	fromUsername string,
+	toUsername string,
+	plaintext []byte,
+) error {
+	sess, ok, err := s.sessionService.GetSession(toUsername)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return errNoSession
+		return ErrNoSession
 	}
 
-	conv, ok, err := s.rstore.Load(toUsername)
+	conv, found, err := s.ratchetStore.LoadConversation(toUsername)
 	if err != nil {
 		return err
 	}
+
 	var prekey *domain.PrekeyMessage
-
-	if !ok {
+	if !found {
+		// No existing conversation: we are the initiator.
+		// Build a fresh Double Ratchet state and include a PrekeyMessage so the
+		// receiver can derive the root key (X3DH) and initialise their side.
+		//
+		// PrekeyMessage fields:
+		//   - InitiatorIK: our identity public key so the receiver can authenticate us.
+		//   - Ephemeral: our X25519 ephemeral public used during X3DH.
+		//   - SPKID/OPKID: which signed/one-time prekey we target on the receiver.
 		id, err := s.idStore.LoadIdentity(passphrase)
 		if err != nil {
 			return err
@@ -55,17 +96,20 @@ func (s *Service) Send(passphrase, fromUsername, toUsername string, plaintext []
 
 		prekey = &domain.PrekeyMessage{
 			InitiatorIK: id.XPub,
-			Ephemeral:   sess.InitiatorEK, // the EK used in X3DH
+			Ephemeral:   sess.InitiatorEK,
 			SPKID:       sess.SPKID,
 			OPKID:       sess.OPKID,
 		}
 	}
 
+	// Encrypt the payload using the current ratchet state.
 	header, ct, err := ratchet.Encrypt(&conv.State, nil, plaintext)
 	if err != nil {
 		return err
 	}
-	if err := s.rstore.Save(conv); err != nil {
+
+	// Persist updated ratchet state before sending to avoid message loss if we crash.
+	if err := s.ratchetStore.SaveConversation(toUsername, conv); err != nil {
 		return err
 	}
 
@@ -74,33 +118,54 @@ func (s *Service) Send(passphrase, fromUsername, toUsername string, plaintext []
 		To:        toUsername,
 		Header:    header,
 		Cipher:    ct,
-		Prekey:    prekey,
+		Prekey:    prekey, // present only for the first message of a conversation
 		Timestamp: time.Now().Unix(),
 	}
-	return s.relay.SendMessage(env)
+	return s.relayClient.SendMessage(ctx, env)
 }
 
-// Recv fetches pending messages and decrypts them.
-// On a first inbound from a peer, it derives the responder root via X3DH (using SPK/optional OPK
-// privs) and then initialises the responder ratchet with the sender's header DH pub.
-func (s *Service) Recv(passphrase, me string, limit int) ([]domain.DecryptedMessage, error) {
-	envs, err := s.relay.FetchMessages(me, limit)
+// Receive fetches pending messages and decrypts them.
+//
+// The method processes envelopes in order. For the first message from a peer,
+// it expects a PrekeyMessage to bootstrap X3DH and initialise the Double Ratchet.
+// If bootstrapping prerequisites are not met, processing stops and remaining
+// envelopes are left queued.
+//
+// We track how many envelopes were processed successfully and ack only that
+// count. This avoids acknowledging messages we did not handle (for example,
+// if a mid-stream decrypt error occurs).
+func (s *Service) ReceiveMessage(
+	ctx context.Context,
+	passphrase string,
+	me string,
+	limit int,
+) ([]domain.DecryptedMessage, error) {
+	envs, err := s.relayClient.FetchMessages(ctx, me, limit)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]domain.DecryptedMessage, 0, len(envs))
-	processedPrefix := 0
+	processed := 0
 
 	for i, env := range envs {
-		conv, ok, err := s.rstore.Load(env.From)
+		conv, found, err := s.ratchetStore.LoadConversation(env.From)
 		if err != nil {
 			return out, err
 		}
 
-		if !ok {
+		if !found {
+			// First message from this peer: bootstrap using the PrekeyMessage.
+			//
+			// Steps:
+			//   1) Validate prerequisites (Prekey present and DH header present).
+			//   2) Load our identity.
+			//   3) Resolve the sender's public from the header.
+			//   4) Load our signed prekey by ID; optionally consume a one-time prekey.
+			//   5) Derive the root key (X3DH) and initialise Double Ratchet as responder.
+			//
+			// If prerequisites are missing, break and leave remaining envelopes queued.
 			if env.Prekey == nil || len(env.Header.DHPub) != 32 {
-				// Not enough context to bootstrap; leave queued.
-				break
+				break // leave the rest queued
 			}
 			id, err := s.idStore.LoadIdentity(passphrase)
 			if err != nil {
@@ -112,7 +177,7 @@ func (s *Service) Recv(passphrase, me string, limit int) ([]domain.DecryptedMess
 			if env.Prekey.SPKID == "" {
 				return out, fmt.Errorf("missing SPKID in prekey message")
 			}
-			spkPriv, _, _, okSPK, err := s.prekeys.LoadSignedPrekeyPair(env.Prekey.SPKID)
+			spkPriv, _, _, okSPK, err := s.prekeyStore.LoadSignedPrekey(env.Prekey.SPKID)
 			if err != nil {
 				return out, err
 			}
@@ -122,9 +187,11 @@ func (s *Service) Recv(passphrase, me string, limit int) ([]domain.DecryptedMess
 
 			var opkPriv *domain.X25519Private
 			if env.Prekey.OPKID != "" {
-				if p, _, okOPK, err := s.prekeys.ConsumeOneTimePair(env.Prekey.OPKID); err != nil {
+				p, _, okOPK, err := s.prekeyStore.ConsumeOneTimePrekey(env.Prekey.OPKID)
+				if err != nil {
 					return out, err
-				} else if okOPK {
+				}
+				if okOPK {
 					opkPriv = &p
 				}
 			}
@@ -133,7 +200,6 @@ func (s *Service) Recv(passphrase, me string, limit int) ([]domain.DecryptedMess
 			if err != nil {
 				return out, fmt.Errorf("x3dh responder root: %w", err)
 			}
-
 			st, err := ratchet.InitAsResponder(rk, id.XPriv, id.XPub, senderPub)
 			if err != nil {
 				return out, err
@@ -141,11 +207,14 @@ func (s *Service) Recv(passphrase, me string, limit int) ([]domain.DecryptedMess
 			conv = domain.Conversation{Peer: env.From, State: st}
 		}
 
+		// Decrypt using the ratchet state and associated data.
 		plain, err := ratchet.Decrypt(&conv.State, env.AD, env.Header, env.Cipher)
 		if err != nil {
 			return out, fmt.Errorf("decrypt from %q failed: %w", env.From, err)
 		}
-		if err := s.rstore.Save(conv); err != nil {
+
+		// Persist updated ratchet state after successful decrypt to advance chains.
+		if err := s.ratchetStore.SaveConversation(env.From, conv); err != nil {
 			return out, fmt.Errorf("save conversation %q: %w", env.From, err)
 		}
 
@@ -155,19 +224,17 @@ func (s *Service) Recv(passphrase, me string, limit int) ([]domain.DecryptedMess
 			Plaintext: plain,
 			Timestamp: env.Timestamp,
 		})
-		processedPrefix = i + 1
+		processed = i + 1
 	}
 
-	if processedPrefix > 0 {
-		if err := s.relay.AckMessages(me, processedPrefix); err != nil {
-			return out, fmt.Errorf("ack %d messages: %w", processedPrefix, err)
+	// Ack only what we processed successfully. If zero, do nothing.
+	if processed > 0 {
+		if err := s.relayClient.AckMessages(ctx, me, processed); err != nil {
+			return out, fmt.Errorf("ack %d messages: %w", processed, err)
 		}
 	}
 	return out, nil
 }
 
-var errNoSession = errString("no session with peer, run start-session first")
-
-type errString string
-
-func (e errString) Error() string { return string(e) }
+// Compile-time assertion that Service implements domain.MessageService.
+var _ domain.MessageService = (*Service)(nil)

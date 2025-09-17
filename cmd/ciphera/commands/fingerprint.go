@@ -4,20 +4,19 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-
-	"ciphera/internal/crypto"
 )
 
+// fingerprintCmd prints the fingerprint of the stored identity.
 func fingerprintCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "fingerprint",
 		Short: "Print identity fingerprint",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id, err := appCtx.Identity.LoadIdentity(passphrase)
+			fp, err := appCtx.IdentityService.FingerprintIdentity(passphrase)
 			if err != nil {
-				return err
+				return fmt.Errorf("loading fingerprint: %w", err)
 			}
-			fp := crypto.Fingerprint(id.XPub[:])
 			fmt.Printf("Fingerprint: %s\n", fp)
 			return nil
 		},

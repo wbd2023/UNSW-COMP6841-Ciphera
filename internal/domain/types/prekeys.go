@@ -17,11 +17,13 @@ type OneTimePreKeyPublic struct {
 // SignedPreKeySignature is base64-encoded automatically.
 type PreKeyBundle struct {
 	Username              Username              `json:"username"`
+	ServerURL             string                `json:"server_url"`
 	IdentityKey           X25519Public          `json:"identity_key"`
 	SigningKey            Ed25519Public         `json:"signing_key"`
 	SignedPreKeyID        SignedPreKeyID        `json:"signed_pre_key_id"`
 	SignedPreKey          X25519Public          `json:"signed_pre_key"`
 	SignedPreKeySignature []byte                `json:"signed_pre_key_signature"`
+	Canary                string                `json:"canary"`
 	OneTimePreKeys        []OneTimePreKeyPublic `json:"one_time_pre_keys,omitempty"`
 }
 

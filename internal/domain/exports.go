@@ -23,6 +23,7 @@ type (
 	RatchetState        = types.RatchetState
 	Conversation        = types.Conversation
 	Session             = types.Session
+	AccountProfile      = types.AccountProfile
 	X25519Public        = types.X25519Public
 	X25519Private       = types.X25519Private
 	Ed25519Public       = types.Ed25519Public
@@ -41,4 +42,5 @@ type (
 	PreKeyBundleStore = interfaces.PreKeyBundleStore
 	SessionStore      = interfaces.SessionStore
 	RatchetStore      = interfaces.RatchetStore
+	AccountStore      = interfaces.AccountStore
 )

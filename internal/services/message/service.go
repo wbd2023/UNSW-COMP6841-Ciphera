@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	"ciphera/internal/domain"
@@ -25,6 +26,8 @@ type Service struct {
 	ratchetStore   domain.RatchetStore
 	sessionService domain.SessionService
 	relayClient    domain.RelayClient
+	accountStore   domain.AccountStore
+	serverURL      *url.URL
 }
 
 var (
@@ -39,13 +42,24 @@ func New(
 	ratchetStore domain.RatchetStore,
 	sessionService domain.SessionService,
 	relayClient domain.RelayClient,
+	accountStore domain.AccountStore,
+	serverURL string,
 ) *Service {
+	var parsed *url.URL
+	if serverURL != "" {
+		if u, err := url.Parse(serverURL); err == nil && u.Scheme != "" && u.Host != "" {
+			parsed = u
+		}
+	}
+
 	return &Service{
 		idStore:        idStore,
 		prekeyStore:    prekeyStore,
 		ratchetStore:   ratchetStore,
 		sessionService: sessionService,
 		relayClient:    relayClient,
+		accountStore:   accountStore,
+		serverURL:      parsed,
 	}
 }
 
@@ -61,6 +75,31 @@ func (s *Service) SendMessage(
 	toUsername domain.Username,
 	plaintext []byte,
 ) error {
+	if s.serverURL == nil {
+		return fmt.Errorf("relay URL is not configured or invalid")
+	}
+
+	serverKey := s.serverURL.String()
+	profile, found, err := s.accountStore.LoadAccountProfile(serverKey, fromUsername)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf(
+			"no account profile for %s on %s; run register",
+			fromUsername,
+			s.serverURL.String(),
+		)
+	}
+
+	serverCanary, err := s.relayClient.FetchAccountCanary(ctx, fromUsername)
+	if err != nil {
+		return fmt.Errorf("fetching account canary: %w", err)
+	}
+	if serverCanary != profile.Canary {
+		return fmt.Errorf("relay canary mismatch: expected %s got %s", profile.Canary, serverCanary)
+	}
+
 	session, hasSession, err := s.sessionService.GetSession(toUsername)
 	if err != nil {
 		return err
@@ -159,6 +198,27 @@ func (s *Service) ReceiveMessage(
 		if err != nil {
 			return decrypted, err
 		}
+		expectedIndex := conversation.State.ReceiveMessageIndex
+		if expectedIndex == 0 && envelope.Header.MessageIndex != 0 {
+			return decrypted, fmt.Errorf(
+				"unexpected header index %d for first message",
+				envelope.Header.MessageIndex,
+			)
+		}
+		if envelope.PreKey != nil {
+			if envelope.Header.MessageIndex != 0 {
+				return decrypted, fmt.Errorf(
+					"invalid pre-key header index %d",
+					envelope.Header.MessageIndex,
+				)
+			}
+			if expectedIndex != 0 {
+				return decrypted, fmt.Errorf(
+					"unexpected pre-key message index %d",
+					expectedIndex,
+				)
+			}
+		}
 
 		if !found {
 			// First message from this peer: bootstrap using the PrekeyMessage.
@@ -191,7 +251,8 @@ func (s *Service) ReceiveMessage(
 				return decrypted, err
 			}
 			if !signedPreKeyFound {
-				return decrypted, fmt.Errorf("signed pre-key %q not found", envelope.PreKey.SignedPreKeyID)
+				return decrypted, fmt.Errorf("signed pre-key %q not found",
+					envelope.PreKey.SignedPreKeyID)
 			}
 
 			var oneTimePreKeyPrivateKey *domain.X25519Private
@@ -228,6 +289,10 @@ func (s *Service) ReceiveMessage(
 			conversation = domain.Conversation{Peer: conversationID, State: ratchetState}
 		}
 
+		if found && envelope.PreKey != nil {
+			return decrypted, fmt.Errorf("unexpected pre-key message from %q", envelope.From)
+		}
+
 		// Decrypt using the ratchet state and associated data.
 		plaintext, err := ratchet.Decrypt(
 			&conversation.State,
@@ -237,6 +302,14 @@ func (s *Service) ReceiveMessage(
 		)
 		if err != nil {
 			return decrypted, fmt.Errorf("decrypt from %q failed: %w", envelope.From, err)
+		}
+
+		if envelope.PreKey != nil && envelope.Header.MessageIndex != expectedIndex {
+			return decrypted, fmt.Errorf(
+				"unexpected message index %d (expected %d)",
+				envelope.Header.MessageIndex,
+				expectedIndex,
+			)
 		}
 
 		// Persist updated ratchet state after successful decrypt to advance chains.

@@ -2,22 +2,22 @@ package types
 
 // RatchetHeader is sent alongside every ciphertext.
 type RatchetHeader struct {
-	DiffieHellmanPublicKey []byte `json:"diffie_hellman_public_key"`
-	PreviousChainLength    uint32 `json:"previous_chain_length"`
-	MessageIndex           uint32 `json:"message_index"`
+	DiffieHellmanPublicKey []byte `json:"dh_pub"`
+	PreviousChainLength    uint32 `json:"pn"`
+	MessageIndex           uint32 `json:"n"`
 }
 
 // RatchetState contains all fields the Double Ratchet needs to track.
 type RatchetState struct {
 	RootKey                 []byte            `json:"root_key"`
-	DiffieHellmanPrivate    X25519Private     `json:"diffie_hellman_private"`
-	DiffieHellmanPublic     X25519Public      `json:"diffie_hellman_public"`
-	PeerDiffieHellmanPublic X25519Public      `json:"peer_diffie_hellman_public"`
-	SendChainKey            []byte            `json:"send_chain_key,omitempty"`
-	ReceiveChainKey         []byte            `json:"receive_chain_key,omitempty"`
-	SendMessageIndex        uint32            `json:"send_message_index"`
-	ReceiveMessageIndex     uint32            `json:"receive_message_index"`
-	PreviousChainLength     uint32            `json:"previous_chain_length"`
+	DiffieHellmanPrivate    X25519Private     `json:"dh_priv"`
+	DiffieHellmanPublic     X25519Public      `json:"dh_pub"`
+	PeerDiffieHellmanPublic X25519Public      `json:"peer_dh_pub"`
+	SendChainKey            []byte            `json:"send_ck,omitempty"`
+	ReceiveChainKey         []byte            `json:"recv_ck,omitempty"`
+	SendMessageIndex        uint32            `json:"ns"`
+	ReceiveMessageIndex     uint32            `json:"nr"`
+	PreviousChainLength     uint32            `json:"pn"`
 	SkippedKeys             map[string][]byte `json:"skipped_keys"`
 }
 

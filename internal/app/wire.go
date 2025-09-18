@@ -30,6 +30,7 @@ func NewWire(cfg Config) (*Wire, error) {
 	bundleStore := store.NewBundleFileStore(cfg.HomeDir)
 	sessionStore := store.NewSessionFileStore(cfg.HomeDir)
 	ratchetStore := store.NewRatchetFileStore(cfg.HomeDir)
+	accountStore := store.NewAccountFileStore(cfg.HomeDir)
 
 	// Ensure an HTTP client is available for outbound calls
 	httpClient := cfg.HTTPClient
@@ -42,9 +43,17 @@ func NewWire(cfg Config) (*Wire, error) {
 
 	// High-level services
 	idSvc := identitysvc.New(idStore)
-	prekeySvc := prekeysvc.New(idStore, prekeyStore, bundleStore)
+	prekeySvc := prekeysvc.New(idStore, prekeyStore, bundleStore, accountStore)
 	sessionSvc := sessionsvc.New(idStore, bundleStore, sessionStore, relayClient)
-	messageSvc := messagesvc.New(idStore, prekeyStore, ratchetStore, sessionSvc, relayClient)
+	messageSvc := messagesvc.New(
+		idStore,
+		prekeyStore,
+		ratchetStore,
+		sessionSvc,
+		relayClient,
+		accountStore,
+		cfg.RelayURL,
+	)
 
 	return &Wire{
 		IdentityService: idSvc,

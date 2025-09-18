@@ -21,4 +21,5 @@ type RelayClient interface {
 		limit int,
 	) ([]domaintypes.Envelope, error)
 	AckMessages(ctx context.Context, username domaintypes.Username, count int) error
+	FetchAccountCanary(ctx context.Context, username domaintypes.Username) (string, error)
 }

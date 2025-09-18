@@ -89,7 +89,7 @@ mkdir -p "${ALICE_HOME}" "${BOB_HOME}"
 
 # Fetch first envelope and tamper header.N
 ENV="$(curl -s "${RELAY_URL}/msg/${BOB_USER}" | jq '.[0]')"
-FORGED="$(jq '.header.N += 1' <<<"${ENV}")"
+FORGED="$(jq '.header.n += 1' <<<"${ENV}")"
 
 echo "Tampering header.N on envelope: incrementing N by 1"
 

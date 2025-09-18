@@ -1,8 +1,11 @@
 package prekey
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	"ciphera/internal/crypto"
@@ -15,9 +18,10 @@ import (
 // One-Time Pre-Keys. Peers use these to complete X3DH and start a
 // Double Ratchet conversation.
 type Service struct {
-	idStore     domain.IdentityStore
-	prekeyStore domain.PreKeyStore
-	bundleStore domain.PreKeyBundleStore
+	idStore      domain.IdentityStore
+	prekeyStore  domain.PreKeyStore
+	bundleStore  domain.PreKeyBundleStore
+	accountStore domain.AccountStore
 }
 
 var (
@@ -30,11 +34,13 @@ func New(
 	idStore domain.IdentityStore,
 	prekeyStore domain.PreKeyStore,
 	bundleStore domain.PreKeyBundleStore,
+	accountStore domain.AccountStore,
 ) *Service {
 	return &Service{
-		idStore:     idStore,
-		prekeyStore: prekeyStore,
-		bundleStore: bundleStore,
+		idStore:      idStore,
+		prekeyStore:  prekeyStore,
+		bundleStore:  bundleStore,
+		accountStore: accountStore,
 	}
 }
 
@@ -114,10 +120,30 @@ func (s *Service) GenerateAndStorePreKeys(
 func (s *Service) LoadPreKeyBundle(
 	passphrase string,
 	username domain.Username,
+	serverURL string,
 ) (domain.PreKeyBundle, error) {
 	id, err := s.idStore.LoadIdentity(passphrase)
 	if err != nil {
 		return domain.PreKeyBundle{}, err
+	}
+
+	parsedURL, err := url.Parse(serverURL)
+	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return domain.PreKeyBundle{}, fmt.Errorf("invalid server URL: %s", serverURL)
+	}
+	canonicalURL := parsedURL.String()
+
+	profile, found, err := s.accountStore.LoadAccountProfile(canonicalURL, username)
+	if err != nil {
+		return domain.PreKeyBundle{}, err
+	}
+
+	canary := profile.Canary
+	if !found {
+		canary, err = generateCanary()
+		if err != nil {
+			return domain.PreKeyBundle{}, err
+		}
 	}
 
 	signedPreKeyIdentifier, ok, err := s.prekeyStore.CurrentSignedPreKeyID()
@@ -145,17 +171,36 @@ func (s *Service) LoadPreKeyBundle(
 
 	bundle := domain.PreKeyBundle{
 		Username:              username,
+		ServerURL:             canonicalURL,
 		IdentityKey:           id.XPub,
 		SigningKey:            id.EdPub,
 		SignedPreKeyID:        signedPreKeyIdentifier,
 		SignedPreKey:          signedPreKeyPublicKey,
 		SignedPreKeySignature: signedPreKeySignature,
+		Canary:                canary,
 		OneTimePreKeys:        oneTimePreKeys,
 	}
 	if err := s.bundleStore.SavePreKeyBundle(bundle); err != nil {
 		return domain.PreKeyBundle{}, err
 	}
+	if err := s.accountStore.SaveAccountProfile(domain.AccountProfile{
+		ServerURL: canonicalURL,
+		Username:  username,
+		Canary:    canary,
+	}); err != nil {
+		return domain.PreKeyBundle{}, err
+	}
 	return bundle, nil
+}
+
+func generateCanary() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	canary := base64.RawURLEncoding.EncodeToString(buf)
+	crypto.Wipe(buf)
+	return canary, nil
 }
 
 // Compile-time assertion that Service implements domain.PrekeyService.

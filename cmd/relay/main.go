@@ -279,6 +279,14 @@ func (s *state) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "username required")
 		return
 	}
+	if bundle.Canary == "" {
+		writeErr(w, http.StatusBadRequest, "canary required")
+		return
+	}
+	if bundle.ServerURL == "" {
+		writeErr(w, http.StatusBadRequest, "server url required")
+		return
+	}
 	if len(bundle.OneTimePreKeys) > maxOneTimeKeys {
 		writeErr(w, http.StatusRequestEntityTooLarge, "too many one-time keys")
 		return
@@ -327,6 +335,25 @@ func (s *state) handleGet(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 	writeJSON(w, bundle)
+}
+
+// handleAccountCanary returns the stored canary (GET /account/{user}/canary).
+func (s *state) handleAccountCanary(w http.ResponseWriter, r *http.Request) {
+	usernameValue := domain.Username(r.PathValue("user"))
+	if usernameValue == "" {
+		writeErr(w, http.StatusBadRequest, "username required")
+		return
+	}
+
+	s.mu.RLock()
+	bundle, ok := s.bundles[usernameValue]
+	s.mu.RUnlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	writeJSON(w, map[string]string{"canary": bundle.Canary})
 }
 
 // handleEnqueue enqueues a new Envelope (POST /msg/{user}).
@@ -494,6 +521,10 @@ func main() {
 		"GET /prekey/{username}",
 		chain(s.handleGet, withRecover, withReqID, withLogging),
 	) // GET  /prekey/{username}
+	mux.HandleFunc(
+		"GET /account/{user}/canary",
+		chain(s.handleAccountCanary, withRecover, withReqID, withLogging),
+	) // GET /account/{user}/canary
 	mux.HandleFunc(
 		"POST /msg/{user}",
 		chain(s.handleEnqueue, withRecover, withReqID, withLogging),

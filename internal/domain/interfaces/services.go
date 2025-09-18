@@ -24,7 +24,11 @@ type PreKeyService interface {
 		[]domaintypes.X25519Public,
 		error,
 	)
-	LoadPreKeyBundle(passphrase string, username domaintypes.Username) (
+	LoadPreKeyBundle(
+		passphrase string,
+		username domaintypes.Username,
+		serverURL string,
+	) (
 		domaintypes.PreKeyBundle,
 		error,
 	)

@@ -17,6 +17,9 @@ func registerCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			usernameValue := domain.Username(args[0])
+			if relayURL == "" {
+				return fmt.Errorf("relay URL is required; set --relay")
+			}
 
 			// Generate and store a Signed Pre-Key plus N One-Time Pre-Keys.
 			_, _, err := appCtx.PreKeyService.GenerateAndStorePreKeys(passphrase, 10)
@@ -25,7 +28,11 @@ func registerCmd() *cobra.Command {
 			}
 
 			// Build the public bundle (identity keys, Signed Pre-Key, One-Time Pre-Keys).
-			bundle, err := appCtx.PreKeyService.LoadPreKeyBundle(passphrase, usernameValue)
+			bundle, err := appCtx.PreKeyService.LoadPreKeyBundle(
+				passphrase,
+				usernameValue,
+				relayURL,
+			)
 			if err != nil {
 				return fmt.Errorf("loading bundle for %q: %w", usernameValue, err)
 			}
@@ -36,6 +43,7 @@ func registerCmd() *cobra.Command {
 			}
 
 			fmt.Println("Registered pre-keys with relay")
+			fmt.Printf("Account canary: %s\n", bundle.Canary)
 			return nil
 		},
 	}

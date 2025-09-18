@@ -119,6 +119,18 @@ func (c *HTTP) AckMessages(ctx context.Context, username domain.Username, count 
 	return c.postJSON(ctx, path, payload, nil)
 }
 
+// FetchAccountCanary retrieves the stored canary for username via GET /account/{user}/canary.
+func (c *HTTP) FetchAccountCanary(ctx context.Context, username domain.Username) (string, error) {
+	path := fmt.Sprintf("/account/%s/canary", url.PathEscape(username.String()))
+	var out struct {
+		Canary string `json:"canary"`
+	}
+	if err := c.getJSON(ctx, path, &out); err != nil {
+		return "", err
+	}
+	return out.Canary, nil
+}
+
 // postJSON encodes in as JSON and POSTs to path, optionally decoding out.
 //
 // path is joined with the client's Base. A non-2xx status returns an error.

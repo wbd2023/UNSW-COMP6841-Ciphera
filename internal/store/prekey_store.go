@@ -13,7 +13,7 @@ const (
 	prekeyMetaFile = "prekey_meta.json"
 )
 
-// PrekeyFileStore persists SPK and OPK state to disk.
+// PrekeyFileStore persists Signed Pre-Key and One-Time Pre-Key state to disk.
 type PrekeyFileStore struct {
 	dir string
 	mu  sync.Mutex
@@ -37,12 +37,12 @@ type opkPair struct {
 }
 
 type prekeyMeta struct {
-	CurrentSPKID string `json:"current_spk_id"`
+	CurrentSignedPreKeyID domain.SignedPreKeyID `json:"current_signed_pre_key_id"`
 }
 
-// SaveSignedPrekey stores a signed prekey by id.
-func (s *PrekeyFileStore) SaveSignedPrekey(
-	id string,
+// SaveSignedPreKey stores a signed pre-key by id.
+func (s *PrekeyFileStore) SaveSignedPreKey(
+	id domain.SignedPreKeyID,
 	priv domain.X25519Private,
 	pub domain.X25519Public,
 	sig []byte,
@@ -51,15 +51,15 @@ func (s *PrekeyFileStore) SaveSignedPrekey(
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.dir, spkPairsFile)
-	m := map[string]spkPair{}
+	m := map[domain.SignedPreKeyID]spkPair{}
 	_ = readJSON(path, &m)
 	m[id] = spkPair{Priv: priv, Pub: pub, Sig: sig}
 	return writeJSON(path, m, 0o600)
 }
 
-// LoadSignedPrekey retrieves a signed prekey by id.
-func (s *PrekeyFileStore) LoadSignedPrekey(
-	id string,
+// LoadSignedPreKey retrieves a signed pre-key by id.
+func (s *PrekeyFileStore) LoadSignedPreKey(
+	id domain.SignedPreKeyID,
 ) (
 	priv domain.X25519Private,
 	pub domain.X25519Public,
@@ -71,7 +71,7 @@ func (s *PrekeyFileStore) LoadSignedPrekey(
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.dir, spkPairsFile)
-	m := map[string]spkPair{}
+	m := map[domain.SignedPreKeyID]spkPair{}
 	if err = readJSON(path, &m); err != nil {
 		return priv, pub, nil, false, err
 	}
@@ -82,13 +82,13 @@ func (s *PrekeyFileStore) LoadSignedPrekey(
 	return p.Priv, p.Pub, p.Sig, true, nil
 }
 
-// SaveOneTimePrekeys merges the provided one-time prekey pairs into the store.
-func (s *PrekeyFileStore) SaveOneTimePrekeys(pairs []domain.OneTimePair) error {
+// SaveOneTimePreKeys merges the provided one-time pre-key pairs into the store.
+func (s *PrekeyFileStore) SaveOneTimePreKeys(pairs []domain.OneTimePreKeyPair) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.dir, opkPairsFile)
-	m := map[string]opkPair{}
+	m := map[domain.OneTimePreKeyID]opkPair{}
 	_ = readJSON(path, &m)
 	for _, p := range pairs {
 		m[p.ID] = opkPair{Priv: p.Priv, Pub: p.Pub}
@@ -96,9 +96,9 @@ func (s *PrekeyFileStore) SaveOneTimePrekeys(pairs []domain.OneTimePair) error {
 	return writeJSON(path, m, 0o600)
 }
 
-// ConsumeOneTimePrekey removes and returns a single one-time prekey by id.
-func (s *PrekeyFileStore) ConsumeOneTimePrekey(
-	id string,
+// ConsumeOneTimePreKey removes and returns a single one-time pre-key by id.
+func (s *PrekeyFileStore) ConsumeOneTimePreKey(
+	id domain.OneTimePreKeyID,
 ) (
 	priv domain.X25519Private,
 	pub domain.X25519Public,
@@ -109,7 +109,7 @@ func (s *PrekeyFileStore) ConsumeOneTimePrekey(
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.dir, opkPairsFile)
-	m := map[string]opkPair{}
+	m := map[domain.OneTimePreKeyID]opkPair{}
 	if err = readJSON(path, &m); err != nil {
 		return priv, pub, false, err
 	}
@@ -124,36 +124,36 @@ func (s *PrekeyFileStore) ConsumeOneTimePrekey(
 	return p.Priv, p.Pub, true, nil
 }
 
-// ListOneTimePrekeyPublics exposes only the public halves for bundling.
-func (s *PrekeyFileStore) ListOneTimePrekeyPublics() ([]domain.OneTimePub, error) {
+// ListOneTimePreKeyPublics exposes only the public halves for bundling.
+func (s *PrekeyFileStore) ListOneTimePreKeyPublics() ([]domain.OneTimePreKeyPublic, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.dir, opkPairsFile)
-	m := map[string]opkPair{}
+	m := map[domain.OneTimePreKeyID]opkPair{}
 	if err := readJSON(path, &m); err != nil {
 		return nil, err
 	}
 
-	out := make([]domain.OneTimePub, 0, len(m))
+	out := make([]domain.OneTimePreKeyPublic, 0, len(m))
 	for id, p := range m {
-		out = append(out, domain.OneTimePub{ID: id, Pub: p.Pub})
+		out = append(out, domain.OneTimePreKeyPublic{ID: id, Pub: p.Pub})
 	}
 	return out, nil
 }
 
-// SetCurrentSignedPrekeyID records which signed prekey id is current.
-func (s *PrekeyFileStore) SetCurrentSignedPrekeyID(id string) error {
+// SetCurrentSignedPreKeyID records which signed pre-key id is current.
+func (s *PrekeyFileStore) SetCurrentSignedPreKeyID(id domain.SignedPreKeyID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.dir, prekeyMetaFile)
-	meta := prekeyMeta{CurrentSPKID: id}
+	meta := prekeyMeta{CurrentSignedPreKeyID: id}
 	return writeJSON(path, meta, 0o600)
 }
 
-// CurrentSignedPrekeyID returns the recorded current signed prekey id.
-func (s *PrekeyFileStore) CurrentSignedPrekeyID() (string, bool, error) {
+// CurrentSignedPreKeyID returns the recorded current signed pre-key id.
+func (s *PrekeyFileStore) CurrentSignedPreKeyID() (domain.SignedPreKeyID, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -162,11 +162,11 @@ func (s *PrekeyFileStore) CurrentSignedPrekeyID() (string, bool, error) {
 	if err := readJSON(path, &meta); err != nil {
 		return "", false, err
 	}
-	if meta.CurrentSPKID == "" {
+	if meta.CurrentSignedPreKeyID == "" {
 		return "", false, nil
 	}
-	return meta.CurrentSPKID, true, nil
+	return meta.CurrentSignedPreKeyID, true, nil
 }
 
-// Compile-time assertion that PrekeyFileStore implements domain.PrekeyStore.
-var _ domain.PrekeyStore = (*PrekeyFileStore)(nil)
+// Compile-time assertion that PrekeyFileStore implements domain.PreKeyStore.
+var _ domain.PreKeyStore = (*PrekeyFileStore)(nil)

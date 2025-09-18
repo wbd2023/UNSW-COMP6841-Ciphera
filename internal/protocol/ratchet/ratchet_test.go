@@ -41,7 +41,7 @@ func newPair(t *testing.T) (a, b domain.RatchetState) {
 	}
 
 	// Responder seeds RecvCK using its identity and sender's current ratchet pub.
-	resp, err := ratchet.InitAsResponder(rk, bPriv, bPub, init.DHPub)
+	resp, err := ratchet.InitAsResponder(rk, bPriv, bPub, init.DiffieHellmanPublic)
 	if err != nil {
 		t.Fatalf("InitAsResponder: %v", err)
 	}
@@ -50,7 +50,12 @@ func newPair(t *testing.T) (a, b domain.RatchetState) {
 }
 
 // send is a thin wrapper around Encrypt for tests.
-func send(t *testing.T, st *domain.RatchetState, ad, msg []byte) (domain.RatchetHeader, []byte) {
+func send(
+	t *testing.T,
+	st *domain.RatchetState,
+	ad []byte,
+	msg []byte,
+) (domain.RatchetHeader, []byte) {
 	t.Helper()
 	h, ct, err := ratchet.Encrypt(st, ad, msg)
 	if err != nil {
@@ -60,7 +65,13 @@ func send(t *testing.T, st *domain.RatchetState, ad, msg []byte) (domain.Ratchet
 }
 
 // recv is a thin wrapper around Decrypt for tests.
-func recv(t *testing.T, st *domain.RatchetState, ad []byte, h domain.RatchetHeader, ct []byte) []byte {
+func recv(
+	t *testing.T,
+	st *domain.RatchetState,
+	ad []byte,
+	h domain.RatchetHeader,
+	ct []byte,
+) []byte {
 	t.Helper()
 	pt, err := ratchet.Decrypt(st, ad, h, ct)
 	if err != nil {
@@ -199,10 +210,10 @@ func TestDoubleRatchet_TamperDetection(t *testing.T) {
 		t.Fatalf("want error on tampered ciphertext, got nil")
 	}
 
-	// Corrupt header.DHPub to ensure header is bound in AEAD.
+	// Corrupt header.DiffieHellmanPublicKey to ensure header is bound in AEAD.
 	hBad := h
-	if len(hBad.DHPub) > 0 {
-		hBad.DHPub[0] ^= 0x01
+	if len(hBad.DiffieHellmanPublicKey) > 0 {
+		hBad.DiffieHellmanPublicKey[0] ^= 0x01
 	}
 	if _, err := ratchet.Decrypt(&b, []byte("ad"), hBad, ct); err == nil {
 		t.Fatalf("want error on tampered header, got nil")
@@ -269,7 +280,7 @@ func TestDoubleRatchet_RejectsExcessiveWithinChainGap(t *testing.T) {
 
 	// Take a valid header, then inflate N to a huge value to trigger gap cap.
 	h, ct := send(t, &a, nil, []byte("big-gap"))
-	h.N = 1 << 20
+	h.MessageIndex = 1 << 20
 
 	_, err := ratchet.Decrypt(&b, nil, h, ct)
 	if !errors.Is(err, ratchet.ErrGapTooLarge) {
@@ -280,13 +291,13 @@ func TestDoubleRatchet_RejectsExcessiveWithinChainGap(t *testing.T) {
 func TestDoubleRatchet_RejectsExcessivePrevChainGap(t *testing.T) {
 	a, b := newPair(t)
 
-	// Forge a "new peer key" by tweaking header.DHPub and set PN huge.
+	// Forge a "new peer key" by tweaking header.DiffieHellmanPublicKey and set a huge PN.
 	h, ct := send(t, &a, nil, []byte("pn-gap"))
-	if len(h.DHPub) == 0 {
+	if len(h.DiffieHellmanPublicKey) == 0 {
 		t.Fatalf("empty dhpub")
 	}
-	h.DHPub[0] ^= 0x01 // force peer DH change
-	h.PN = 1 << 20     // excessive previous-chain gap
+	h.DiffieHellmanPublicKey[0] ^= 0x01 // force peer DH change
+	h.PreviousChainLength = 1 << 20     // excessive previous-chain gap
 
 	_, err := ratchet.Decrypt(&b, nil, h, ct)
 	if !errors.Is(err, ratchet.ErrGapTooLarge) {
@@ -298,7 +309,8 @@ func TestDoubleRatchet_InvalidHeaderLength(t *testing.T) {
 	a, b := newPair(t)
 
 	h, ct := send(t, &a, nil, []byte("x"))
-	h.DHPub = h.DHPub[:len(h.DHPub)-1] // make it 31 bytes
+	trim := len(h.DiffieHellmanPublicKey) - 1
+	h.DiffieHellmanPublicKey = h.DiffieHellmanPublicKey[:trim] // make it 31 bytes
 
 	if _, err := ratchet.Decrypt(&b, nil, h, ct); err == nil {
 		t.Fatalf("want error for invalid dh_pub length, got nil")
@@ -308,18 +320,23 @@ func TestDoubleRatchet_InvalidHeaderLength(t *testing.T) {
 func TestDoubleRatchet_LazySendDoesNotChangeNr(t *testing.T) {
 	a, b := newPair(t)
 
-	// Make B receive once to bump Nr.
+	// Make B receive once to bump ReceiveMessageIndex.
 	h1, ct1 := send(t, &a, nil, []byte("hello"))
 	_ = recv(t, &b, nil, h1, ct1)
-	before := b.Nr
+	before := b.ReceiveMessageIndex
 
-	// B's first send lazily sets up SendCK; Nr must not change.
+	// B's first send lazily sets up SendChainKey.
+	// ReceiveMessageIndex must not change.
 	_, _, err := ratchet.Encrypt(&b, nil, []byte("ping"))
 	if err != nil {
 		t.Fatalf("encrypt at B: %v", err)
 	}
-	if b.Nr != before {
-		t.Fatalf("Nr changed on lazy send: got %d, want %d", b.Nr, before)
+	if b.ReceiveMessageIndex != before {
+		t.Fatalf(
+			"ReceiveMessageIndex changed on lazy send: got %d, want %d",
+			b.ReceiveMessageIndex,
+			before,
+		)
 	}
 }
 
@@ -327,19 +344,24 @@ func TestDoubleRatchet_OldOrReplayErrorDoesNotAdvance(t *testing.T) {
 	a, b := newPair(t)
 
 	h, ct := send(t, &a, nil, []byte("once"))
-	// First decrypt advances Nr by 1.
+	// First decrypt advances ReceiveMessageIndex by 1.
 	if _, err := ratchet.Decrypt(&b, nil, h, ct); err != nil {
 		t.Fatalf("first decrypt: %v", err)
 	}
-	nr := b.Nr
+	nr := b.ReceiveMessageIndex
 
-	// Second decrypt should return ErrOldOrReplay and not change Nr.
+	// Second decrypt should return ErrOldOrReplay and leave
+	// ReceiveMessageIndex unchanged.
 	_, err := ratchet.Decrypt(&b, nil, h, ct)
 	if !errors.Is(err, ratchet.ErrOldOrReplay) {
 		t.Fatalf("want ErrOldOrReplay, got %v", err)
 	}
-	if b.Nr != nr {
-		t.Fatalf("Nr changed after old/replay attempt: got %d, want %d", b.Nr, nr)
+	if b.ReceiveMessageIndex != nr {
+		t.Fatalf(
+			"ReceiveMessageIndex changed after old/replay attempt: got %d, want %d",
+			b.ReceiveMessageIndex,
+			nr,
+		)
 	}
 }
 
@@ -347,14 +369,14 @@ func TestDoubleRatchet_HeaderTamperSmallPNAndN(t *testing.T) {
 	a, b := newPair(t)
 
 	h, ct := send(t, &a, nil, []byte("hdr-bound"))
-	h.PN ^= 1 // small change
+	h.PreviousChainLength ^= 1 // small change
 	if _, err := ratchet.Decrypt(&b, nil, h, ct); err == nil {
 		t.Fatalf("want error on PN tamper, got nil")
 	}
 
 	// Recreate a valid packet then tamper N by +/-1.
 	h2, ct2 := send(t, &a, nil, []byte("hdr-bound-2"))
-	h2.N ^= 1
+	h2.MessageIndex ^= 1
 	if _, err := ratchet.Decrypt(&b, nil, h2, ct2); err == nil {
 		t.Fatalf("want error on N tamper, got nil")
 	}

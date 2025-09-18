@@ -15,7 +15,7 @@ import (
 // Wire bundles all stores, services, and clients for the CLI.
 type Wire struct {
 	IdentityService domain.IdentityService
-	PrekeyService   domain.PrekeyService
+	PreKeyService   domain.PreKeyService
 	SessionService  domain.SessionService
 	MessageService  domain.MessageService
 	RelayClient     domain.RelayClient
@@ -48,7 +48,7 @@ func NewWire(cfg Config) (*Wire, error) {
 
 	return &Wire{
 		IdentityService: idSvc,
-		PrekeyService:   prekeySvc,
+		PreKeyService:   prekeySvc,
 		SessionService:  sessionSvc,
 		MessageService:  messageSvc,
 		RelayClient:     relayClient,

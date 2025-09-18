@@ -26,7 +26,7 @@ var (
 //
 // The identity contains:
 //   - X25519 key pair for Diffie-Hellman (X3DH and Double Ratchet).
-//   - Ed25519 key pair for signing (e.g., signing the SPK).
+//   - Ed25519 key pair for signing (for example, signing the Signed Pre-Key).
 type Service struct {
 	store domain.IdentityStore
 }
@@ -38,32 +38,32 @@ func New(s domain.IdentityStore) *Service { return &Service{store: s} }
 // and returns the identity plus a short fingerprint of the X25519 public key.
 func (s *Service) GenerateIdentity(
 	passphrase string,
-) (domain.Identity, string, error) {
+) (domain.Identity, domain.Fingerprint, error) {
 	if !isSecurePassphrase(passphrase) {
 		return domain.Identity{}, "", ErrWeakPassphrase
 	}
 
 	// Generate Diffie-Hellman keypair for X3DH.
-	xpriv, xpub, err := crypto.GenerateX25519()
+	identityDiffieHellmanPrivateKey, identityDiffieHellmanPublicKey, err := crypto.GenerateX25519()
 	if err != nil {
 		return domain.Identity{}, "", err
 	}
 	// Generate signing keypair.
-	edpriv, edpub, err := crypto.GenerateEd25519()
+	identitySigningPrivateKey, identitySigningPublicKey, err := crypto.GenerateEd25519()
 	if err != nil {
 		return domain.Identity{}, "", err
 	}
 
 	id := domain.Identity{
-		XPub:   xpub,
-		XPriv:  xpriv,
-		EdPub:  edpub,
-		EdPriv: edpriv,
+		XPub:   identityDiffieHellmanPublicKey,
+		XPriv:  identityDiffieHellmanPrivateKey,
+		EdPub:  identitySigningPublicKey,
+		EdPriv: identitySigningPrivateKey,
 	}
 	if err := s.store.SaveIdentity(passphrase, id); err != nil {
 		return domain.Identity{}, "", err
 	}
-	return id, crypto.Fingerprint(id.XPub.Slice()), nil
+	return id, domain.Fingerprint(crypto.Fingerprint(id.XPub.Slice())), nil
 }
 
 // LoadIdentity decrypts and returns the local identity.
@@ -72,12 +72,12 @@ func (s *Service) LoadIdentity(passphrase string) (domain.Identity, error) {
 }
 
 // FingerprintIdentity returns a short fingerprint of the local X25519 public key.
-func (s *Service) FingerprintIdentity(passphrase string) (string, error) {
+func (s *Service) FingerprintIdentity(passphrase string) (domain.Fingerprint, error) {
 	id, err := s.store.LoadIdentity(passphrase)
 	if err != nil {
 		return "", err
 	}
-	return crypto.Fingerprint(id.XPub.Slice()), nil
+	return domain.Fingerprint(crypto.Fingerprint(id.XPub.Slice())), nil
 }
 
 // isSecurePassphrase enforces a basic strength policy.

@@ -21,29 +21,34 @@ func NewRatchetFileStore(dir string) *RatchetFileStore {
 }
 
 // SaveConversation writes the Conversation for peer.
-func (s *RatchetFileStore) SaveConversation(peer string, conv domain.Conversation) error {
+func (s *RatchetFileStore) SaveConversation(
+	peer domain.ConversationID,
+	conversation domain.Conversation,
+) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.dir, convFilename)
-	m := map[string]domain.Conversation{}
-	_ = readJSON(path, &m)
-	m[peer] = conv
-	return writeJSON(path, m, 0o600)
+	conversations := make(map[domain.ConversationID]domain.Conversation)
+	_ = readJSON(path, &conversations)
+	conversations[peer] = conversation
+	return writeJSON(path, conversations, 0o600)
 }
 
 // LoadConversation retrieves the Conversation for peer.
-func (s *RatchetFileStore) LoadConversation(peer string) (domain.Conversation, bool, error) {
+func (s *RatchetFileStore) LoadConversation(
+	peer domain.ConversationID,
+) (domain.Conversation, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.dir, convFilename)
-	m := map[string]domain.Conversation{}
-	if err := readJSON(path, &m); err != nil {
+	conversations := make(map[domain.ConversationID]domain.Conversation)
+	if err := readJSON(path, &conversations); err != nil {
 		return domain.Conversation{}, false, err
 	}
-	c, ok := m[peer]
-	return c, ok, nil
+	conversation, ok := conversations[peer]
+	return conversation, ok, nil
 }
 
 // Compile-time assertion that RatchetFileStore implements domain.RatchetStore.

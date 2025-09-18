@@ -34,112 +34,126 @@ func makeIdentity(t *testing.T) domain.Identity {
 	}
 }
 
-func TestInitiatorAndResponderRoot_NoOPK(t *testing.T) {
+func TestInitiatorAndResponderRoot_NoOneTimePreKey(t *testing.T) {
 	// Alice is initiator, Bob is responder.
 	alice := makeIdentity(t)
 	bob := makeIdentity(t)
 
 	// Bob's signed prekey pair + sig.
-	spkPriv, spkPub, err := crypto.GenerateX25519()
+	signedPreKeyPrivateKey, signedPreKeyPublicKey, err := crypto.GenerateX25519()
 	if err != nil {
 		t.Fatalf("GenerateX25519: %v", err)
 	}
-	sig := crypto.SignEd25519(bob.EdPriv, spkPub[:])
+	signedPreKeySignature := crypto.SignEd25519(bob.EdPriv, signedPreKeyPublicKey[:])
 
 	// Bob publishes a bundle with no OPKs.
-	bundle := domain.PrekeyBundle{
-		Username:        "bob",
-		IdentityKey:     bob.XPub,
-		SignKey:         bob.EdPub,
-		SPKID:           "spk-test",
-		SignedPrekey:    spkPub,
-		SignedPrekeySig: sig,
-		OneTime:         nil,
+	bundle := domain.PreKeyBundle{
+		Username:              domain.Username("bob"),
+		IdentityKey:           bob.XPub,
+		SigningKey:            bob.EdPub,
+		SignedPreKeyID:        domain.SignedPreKeyID("spk-test"),
+		SignedPreKey:          signedPreKeyPublicKey,
+		SignedPreKeySignature: signedPreKeySignature,
+		OneTimePreKeys:        nil,
 	}
 
 	// Alice derives RK and emits eph pub.
-	rkA, spkID, opkID, ephPub, err := x3dh.InitiatorRoot(alice, bundle)
+	rootKeyInitiator,
+		signedPreKeyID,
+		oneTimePreKeyID,
+		initiatorEphemeralPublicKey,
+		err := x3dh.InitiatorRoot(alice, bundle)
 	if err != nil {
 		t.Fatalf("InitiatorRoot: %v", err)
 	}
-	if spkID != "spk-test" {
-		t.Fatalf("want spkID=spk-test, got %q", spkID)
+	if signedPreKeyID != domain.SignedPreKeyID("spk-test") {
+		t.Fatalf("want signed pre-key id spk-test, got %q", signedPreKeyID)
 	}
-	if opkID != "" {
-		t.Fatalf("want empty opkID, got %q", opkID)
+	if oneTimePreKeyID != "" {
+		t.Fatalf("want empty one-time pre-key id, got %q", oneTimePreKeyID)
 	}
 
 	// Alice's first message would carry this.
-	pm := domain.PrekeyMessage{
-		InitiatorIK: alice.XPub,
-		Ephemeral:   ephPub,
-		SPKID:       spkID,
-		OPKID:       opkID,
+	pm := domain.PreKeyMessage{
+		InitiatorIdentityKey: alice.XPub,
+		EphemeralKey:         initiatorEphemeralPublicKey,
+		SignedPreKeyID:       signedPreKeyID,
+		OneTimePreKeyID:      oneTimePreKeyID,
 	}
 
 	// Bob recomputes the same RK using his SPK private and identity.
-	rkB, err := x3dh.ResponderRoot(bob, spkPriv, nil, pm)
+	rootKeyResponder, err := x3dh.ResponderRoot(bob, signedPreKeyPrivateKey, nil, pm)
 	if err != nil {
 		t.Fatalf("ResponderRoot: %v", err)
 	}
-	if !bytes.Equal(rkA, rkB) {
+	if !bytes.Equal(rootKeyInitiator, rootKeyResponder) {
 		t.Fatal("root keys differ (no OPK)")
 	}
 }
 
-func TestInitiatorAndResponderRoot_WithOPK(t *testing.T) {
+func TestInitiatorAndResponderRoot_WithOneTimePreKey(t *testing.T) {
 	// Alice is initiator, Bob is responder.
 	alice := makeIdentity(t)
 	bob := makeIdentity(t)
 
 	// Bob's signed prekey.
-	spkPriv, spkPub, err := crypto.GenerateX25519()
+	signedPreKeyPrivateKey, signedPreKeyPublicKey, err := crypto.GenerateX25519()
 	if err != nil {
 		t.Fatalf("GenerateX25519: %v", err)
 	}
-	sig := crypto.SignEd25519(bob.EdPriv, spkPub[:])
+	signedPreKeySignature := crypto.SignEd25519(bob.EdPriv, signedPreKeyPublicKey[:])
 
 	// Bob has a one-time prekey too.
-	opkPriv, opkPub, err := crypto.GenerateX25519()
+	oneTimePreKeyPrivateKey, oneTimePreKeyPublicKey, err := crypto.GenerateX25519()
 	if err != nil {
 		t.Fatalf("GenerateX25519 (opk): %v", err)
 	}
 
-	bundle := domain.PrekeyBundle{
-		Username:        "bob",
-		IdentityKey:     bob.XPub,
-		SignKey:         bob.EdPub,
-		SPKID:           "spk-test",
-		SignedPrekey:    spkPub,
-		SignedPrekeySig: sig,
-		OneTime: []domain.OneTimePub{
-			{ID: "opk-1", Pub: opkPub},
+	bundle := domain.PreKeyBundle{
+		Username:              domain.Username("bob"),
+		IdentityKey:           bob.XPub,
+		SigningKey:            bob.EdPub,
+		SignedPreKeyID:        domain.SignedPreKeyID("spk-test"),
+		SignedPreKey:          signedPreKeyPublicKey,
+		SignedPreKeySignature: signedPreKeySignature,
+		OneTimePreKeys: []domain.OneTimePreKeyPublic{
+			{ID: domain.OneTimePreKeyID("opk-1"), Pub: oneTimePreKeyPublicKey},
 		},
 	}
 
 	// Alice picks Bob's OPK and derives RK.
-	rkA, spkID, opkID, ephPub, err := x3dh.InitiatorRoot(alice, bundle)
+	rootKeyInitiator,
+		signedPreKeyID,
+		oneTimePreKeyID,
+		initiatorEphemeralPublicKey,
+		err := x3dh.InitiatorRoot(alice, bundle)
 	if err != nil {
 		t.Fatalf("InitiatorRoot: %v", err)
 	}
-	if spkID != "spk-test" || opkID != "opk-1" {
-		t.Fatalf("unexpected IDs spk=%q opk=%q", spkID, opkID)
+	if signedPreKeyID != domain.SignedPreKeyID("spk-test") ||
+		oneTimePreKeyID != domain.OneTimePreKeyID("opk-1") {
+		t.Fatalf("unexpected IDs signed=%q one-time=%q", signedPreKeyID, oneTimePreKeyID)
 	}
 
 	// Alice's first message would carry this.
-	pm := domain.PrekeyMessage{
-		InitiatorIK: alice.XPub,
-		Ephemeral:   ephPub,
-		SPKID:       spkID,
-		OPKID:       opkID,
+	pm := domain.PreKeyMessage{
+		InitiatorIdentityKey: alice.XPub,
+		EphemeralKey:         initiatorEphemeralPublicKey,
+		SignedPreKeyID:       signedPreKeyID,
+		OneTimePreKeyID:      oneTimePreKeyID,
 	}
 
 	// Bob recomputes with SPK and OPK privs.
-	rkB, err := x3dh.ResponderRoot(bob, spkPriv, &opkPriv, pm)
+	rootKeyResponder, err := x3dh.ResponderRoot(
+		bob,
+		signedPreKeyPrivateKey,
+		&oneTimePreKeyPrivateKey,
+		pm,
+	)
 	if err != nil {
 		t.Fatalf("ResponderRoot: %v", err)
 	}
-	if !bytes.Equal(rkA, rkB) {
+	if !bytes.Equal(rootKeyInitiator, rootKeyResponder) {
 		t.Fatal("root keys differ (with OPK)")
 	}
 }

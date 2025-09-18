@@ -2,8 +2,10 @@
 //
 // Contents
 //
-//   - X25519 key generation, clamping and Diffie–Hellman (GenerateX25519, ClampX25519PrivateKey, DH)
-//   - Ed25519 key generation, signing and verification (GenerateEd25519, SignEd25519, VerifyEd25519)
+//   - X25519 key generation, clamping and Diffie–Hellman (GenerateX25519,
+//     ClampX25519PrivateKey, DH)
+//   - Ed25519 key generation, signing and verification (GenerateEd25519,
+//     SignEd25519, VerifyEd25519)
 //   - Best-effort memory wiping for sensitive byte slices (Wipe)
 //   - Short public-key fingerprints for display/logging (Fingerprint)
 //

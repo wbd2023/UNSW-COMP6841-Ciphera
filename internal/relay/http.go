@@ -34,24 +34,24 @@ func NewHTTP(base string, client *http.Client) *HTTP {
 	return &HTTP{Base: base, client: client}
 }
 
-// RegisterPrekeyBundle publishes a PrekeyBundle to POST /register.
+// RegisterPreKeyBundle publishes a PreKeyBundle to POST /register.
 //
 // The server expects a JSON body describing the caller's current prekeys.
-func (c *HTTP) RegisterPrekeyBundle(ctx context.Context, b domain.PrekeyBundle) error {
-	return c.postJSON(ctx, "/register", b, nil)
+func (c *HTTP) RegisterPreKeyBundle(ctx context.Context, bundle domain.PreKeyBundle) error {
+	return c.postJSON(ctx, "/register", bundle, nil)
 }
 
-// FetchPrekeyBundle retrieves the bundle for username via GET /prekey/{username}.
+// FetchPreKeyBundle retrieves the bundle for username via GET /prekey/{username}.
 //
-// The response body is JSON and is decoded into a domain.PrekeyBundle.
-func (c *HTTP) FetchPrekeyBundle(
+// The response body is JSON and is decoded into a domain.PreKeyBundle.
+func (c *HTTP) FetchPreKeyBundle(
 	ctx context.Context,
-	username string,
-) (domain.PrekeyBundle, error) {
-	var out domain.PrekeyBundle
-	path := fmt.Sprintf("/prekey/%s", url.PathEscape(username))
+	username domain.Username,
+) (domain.PreKeyBundle, error) {
+	var out domain.PreKeyBundle
+	path := fmt.Sprintf("/prekey/%s", url.PathEscape(username.String()))
 	if err := c.getJSON(ctx, path, &out); err != nil {
-		return domain.PrekeyBundle{}, err
+		return domain.PreKeyBundle{}, err
 	}
 	return out, nil
 }
@@ -59,9 +59,9 @@ func (c *HTTP) FetchPrekeyBundle(
 // SendMessage posts an Envelope to POST /msg/{to}.
 //
 // The envelope is sent as JSON. A non-2xx status is treated as an error.
-func (c *HTTP) SendMessage(ctx context.Context, env domain.Envelope) error {
-	path := fmt.Sprintf("/msg/%s", url.PathEscape(env.To))
-	return c.postJSON(ctx, path, env, nil)
+func (c *HTTP) SendMessage(ctx context.Context, envelope domain.Envelope) error {
+	path := fmt.Sprintf("/msg/%s", url.PathEscape(envelope.To.String()))
+	return c.postJSON(ctx, path, envelope, nil)
 }
 
 // FetchMessages GETs up to limit envelopes from /msg/{user}?limit=N.
@@ -70,11 +70,11 @@ func (c *HTTP) SendMessage(ctx context.Context, env domain.Envelope) error {
 // The response is a JSON array decoded into []domain.Envelope.
 func (c *HTTP) FetchMessages(
 	ctx context.Context,
-	username string,
+	username domain.Username,
 	limit int,
 ) ([]domain.Envelope, error) {
 	// Build path using a URL-safe username, then combine with base.
-	path := fmt.Sprintf("/msg/%s", url.PathEscape(username))
+	path := fmt.Sprintf("/msg/%s", url.PathEscape(username.String()))
 
 	fullURL, err := url.JoinPath(c.Base, path)
 	if err != nil {
@@ -99,23 +99,23 @@ func (c *HTTP) FetchMessages(
 		return nil, err
 	}
 
-	var envs []domain.Envelope
-	if err := c.do(req, &envs); err != nil {
+	var envelopes []domain.Envelope
+	if err := c.do(req, &envelopes); err != nil {
 		return nil, err
 	}
-	return envs, nil
+	return envelopes, nil
 }
 
 // AckMessages sends an acknowledgment to POST /msg/{user}/ack with {count}.
 //
 // The payload is JSON: {"count": N}. Servers use this to delete or mark
 // messages as delivered.
-func (c *HTTP) AckMessages(ctx context.Context, username string, count int) error {
+func (c *HTTP) AckMessages(ctx context.Context, username domain.Username, count int) error {
 	payload := struct {
 		Count int `json:"count"`
 	}{Count: count}
 
-	path := fmt.Sprintf("/msg/%s/ack", url.PathEscape(username))
+	path := fmt.Sprintf("/msg/%s/ack", url.PathEscape(username.String()))
 	return c.postJSON(ctx, path, payload, nil)
 }
 

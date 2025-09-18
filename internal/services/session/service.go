@@ -19,7 +19,7 @@ import (
 //   - Persisting the resulting session for later message encryption.
 type Service struct {
 	idStore      domain.IdentityStore
-	prekeyStore  domain.PrekeyBundleStore
+	prekeyStore  domain.PreKeyBundleStore
 	sessionStore domain.SessionStore
 	relayClient  domain.RelayClient
 }
@@ -27,7 +27,7 @@ type Service struct {
 // New constructs a Session Service with the given stores and relay client.
 func New(
 	idStore domain.IdentityStore,
-	prekeyStore domain.PrekeyBundleStore,
+	prekeyStore domain.PreKeyBundleStore,
 	sessionStore domain.SessionStore,
 	relayClient domain.RelayClient,
 ) *Service {
@@ -43,16 +43,16 @@ func New(
 //
 // Steps:
 //  1. Load our own identity key pair from the identity store.
-//  2. Fetch the peer's prekey bundle from the relay (contains identity key,
-//     signed prekey, and optionally a one-time prekey).
-//  3. Run X3DH as the initiator to derive the root key and record which prekeys
+//  2. Fetch the peer's pre-key bundle from the relay (contains identity key,
+//     Signed Pre-Key, and optionally a One-Time Pre-Key).
+//  3. Run X3DH as the initiator to derive the root key and record which pre-keys
 //     were used.
 //  4. Create a Session record and persist it to the session store for future
 //     message exchanges.
 func (s *Service) InitiateSession(
 	ctx context.Context,
 	passphrase string,
-	peer string,
+	peer domain.Username,
 ) (domain.Session, error) {
 	// Load our identity from secure storage.
 	id, err := s.idStore.LoadIdentity(passphrase)
@@ -61,39 +61,43 @@ func (s *Service) InitiateSession(
 	}
 
 	// Get the peer's current prekey bundle from the relay.
-	bundle, err := s.relayClient.FetchPrekeyBundle(ctx, peer)
+	bundle, err := s.relayClient.FetchPreKeyBundle(ctx, peer)
 	if err != nil {
 		return domain.Session{}, err
 	}
 
 	// Perform X3DH as the initiator to derive the shared root key and identify
 	// which SPK/OPK were used.
-	rk, spkID, opkID, ephPub, err := x3dh.InitiatorRoot(id, bundle)
+	rootKey,
+		signedPreKeyIdentifier,
+		oneTimePreKeyIdentifier,
+		initiatorEphemeralPublicKey,
+		err := x3dh.InitiatorRoot(id, bundle)
 	if err != nil {
 		return domain.Session{}, err
 	}
 
 	// Build the session record.
-	sess := domain.Session{
-		Peer:        peer,
-		RootKey:     rk,
-		PeerSPK:     bundle.SignedPrekey,
-		PeerIK:      bundle.IdentityKey,
-		CreatedUTC:  time.Now().Unix(),
-		SPKID:       spkID,
-		OPKID:       opkID,
-		InitiatorEK: ephPub,
+	session := domain.Session{
+		PeerUsername:          peer,
+		RootKey:               rootKey,
+		PeerSignedPreKey:      bundle.SignedPreKey,
+		PeerIdentityKey:       bundle.IdentityKey,
+		CreatedUTC:            time.Now().Unix(),
+		SignedPreKeyID:        signedPreKeyIdentifier,
+		OneTimePreKeyID:       oneTimePreKeyIdentifier,
+		InitiatorEphemeralKey: initiatorEphemeralPublicKey,
 	}
 
 	// Persist the session for later retrieval.
-	if err := s.sessionStore.SaveSession(peer, sess); err != nil {
+	if err := s.sessionStore.SaveSession(peer, session); err != nil {
 		return domain.Session{}, err
 	}
-	return sess, nil
+	return session, nil
 }
 
 // Get retrieves a stored session for the given peer from the session store.
-func (s *Service) GetSession(peer string) (domain.Session, bool, error) {
+func (s *Service) GetSession(peer domain.Username) (domain.Session, bool, error) {
 	return s.sessionStore.LoadSession(peer)
 }
 

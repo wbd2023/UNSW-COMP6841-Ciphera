@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"ciphera/internal/domain"
 )
 
 // startSessionCmd performs the X3DH handshake against a peer's prekey bundle and persists a new
@@ -14,16 +16,16 @@ func startSessionCmd() *cobra.Command {
 		Short: "Establish a secure session with a peer",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			peer := args[0]
+			peerUsername := domain.Username(args[0])
 
 			// Initiate handshake and store session state.
-			_, err := appCtx.SessionService.InitiateSession(cmd.Context(), passphrase, peer)
+			_, err := appCtx.SessionService.InitiateSession(cmd.Context(), passphrase, peerUsername)
 			if err != nil {
-				return fmt.Errorf("starting session with %q: %w", peer, err)
+				return fmt.Errorf("starting session with %q: %w", peerUsername, err)
 			}
 
 			// Print confirmation only (do not leak secret material).
-			fmt.Printf("Session created with %s\n", peer)
+			fmt.Printf("Session created with %s\n", peerUsername)
 
 			return nil
 		},

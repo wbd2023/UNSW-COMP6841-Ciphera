@@ -13,108 +13,111 @@ import (
 
 const x3dhLabel = "ciphera/x3dh-v1"
 
-var ErrBadSPK = errors.New("signed prekey verification failed")
+var ErrBadSignedPreKey = errors.New("signed prekey verification failed")
 
 // InitiatorRoot performs the X3DH handshake as the initiator.
-// Returns (rootKey, usedSPKID, usedOPKID, ephPub, error).
+// Returns (rootKey, used Signed Pre-Key ID, used One-Time Pre-Key ID,
+// initiator ephemeral public key, error).
 func InitiatorRoot(
-	our domain.Identity,
-	b domain.PrekeyBundle,
+	initiatorIdentity domain.Identity,
+	responderPreKeyBundle domain.PreKeyBundle,
 ) (
 	root []byte,
-	spkID string,
-	opkID string,
-	ephPub domain.X25519Public,
+	signedPreKeyID domain.SignedPreKeyID,
+	oneTimePreKeyID domain.OneTimePreKeyID,
+	initiatorEphemeralPublicKey domain.X25519Public,
 	err error,
 ) {
-	if !verifySPK(b) {
-		return nil, "", "", ephPub, ErrBadSPK
+	if !verifySignedPreKey(responderPreKeyBundle) {
+		return nil, "", "", initiatorEphemeralPublicKey, ErrBadSignedPreKey
 	}
 
-	ephPriv, ephPub, err := crypto.GenerateX25519()
+	initiatorEphemeralPrivateKey, initiatorEphemeralPublicKey, err := crypto.GenerateX25519()
 	if err != nil {
-		return nil, "", "", ephPub, err
+		return nil, "", "", initiatorEphemeralPublicKey, err
 	}
-	spkID = b.SPKID
+	signedPreKeyID = responderPreKeyBundle.SignedPreKeyID
 
-	var opk *domain.X25519Public
-	if len(b.OneTime) > 0 {
-		opkID = b.OneTime[0].ID
-		opk = &b.OneTime[0].Pub
-	}
-
-	dh1, err := crypto.DH(our.XPriv, b.SignedPrekey)
-	if err != nil {
-		return nil, "", "", ephPub, err
-	}
-	dh2, err := crypto.DH(ephPriv, b.IdentityKey)
-	if err != nil {
-		return nil, "", "", ephPub, err
-	}
-	dh3, err := crypto.DH(ephPriv, b.SignedPrekey)
-	if err != nil {
-		return nil, "", "", ephPub, err
+	var oneTimePreKeyPublic *domain.X25519Public
+	if len(responderPreKeyBundle.OneTimePreKeys) > 0 {
+		oneTimePreKeyID = responderPreKeyBundle.OneTimePreKeys[0].ID
+		oneTimePreKeyPublic = &responderPreKeyBundle.OneTimePreKeys[0].Pub
 	}
 
-	if opk != nil {
-		dh4, derr := crypto.DH(ephPriv, *opk)
+	diffieHellman1, err := crypto.DH(initiatorIdentity.XPriv, responderPreKeyBundle.SignedPreKey)
+	if err != nil {
+		return nil, "", "", initiatorEphemeralPublicKey, err
+	}
+	diffieHellman2, err := crypto.DH(initiatorEphemeralPrivateKey, responderPreKeyBundle.IdentityKey)
+	if err != nil {
+		return nil, "", "", initiatorEphemeralPublicKey, err
+	}
+	diffieHellman3, err := crypto.DH(initiatorEphemeralPrivateKey, responderPreKeyBundle.SignedPreKey)
+	if err != nil {
+		return nil, "", "", initiatorEphemeralPublicKey, err
+	}
+
+	if oneTimePreKeyPublic != nil {
+		diffieHellman4, derr := crypto.DH(initiatorEphemeralPrivateKey, *oneTimePreKeyPublic)
 		if derr != nil {
-			return nil, "", "", ephPub, derr
+			return nil, "", "", initiatorEphemeralPublicKey, derr
 		}
-		root, err = deriveRootFromShared(dh1, dh2, dh3, dh4)
+		root, err = deriveRootFromShared(diffieHellman1, diffieHellman2, diffieHellman3, diffieHellman4)
 	} else {
-		root, err = deriveRootFromShared(dh1, dh2, dh3)
+		root, err = deriveRootFromShared(diffieHellman1, diffieHellman2, diffieHellman3)
 	}
-	return root, spkID, opkID, ephPub, err
+	return root, signedPreKeyID, oneTimePreKeyID, initiatorEphemeralPublicKey, err
 }
 
 // ResponderRoot performs the X3DH handshake as the responder.
 func ResponderRoot(
-	my domain.Identity,
-	spkPriv domain.X25519Private,
-	opkPriv *domain.X25519Private,
-	pm domain.PrekeyMessage,
+	responderIdentity domain.Identity,
+	signedPreKeyPrivateKey domain.X25519Private,
+	oneTimePreKeyPrivateKey *domain.X25519Private,
+	preKeyMessage domain.PreKeyMessage,
 ) (root []byte, err error) {
-	dh1, err := crypto.DH(spkPriv, pm.InitiatorIK)
+	diffieHellman1, err := crypto.DH(signedPreKeyPrivateKey, preKeyMessage.InitiatorIdentityKey)
 	if err != nil {
 		return nil, err
 	}
-	dh2, err := crypto.DH(my.XPriv, pm.Ephemeral)
+	diffieHellman2, err := crypto.DH(responderIdentity.XPriv, preKeyMessage.EphemeralKey)
 	if err != nil {
 		return nil, err
 	}
-	dh3, err := crypto.DH(spkPriv, pm.Ephemeral)
+	diffieHellman3, err := crypto.DH(signedPreKeyPrivateKey, preKeyMessage.EphemeralKey)
 	if err != nil {
 		return nil, err
 	}
 
-	if opkPriv != nil {
-		dh4, derr := crypto.DH(*opkPriv, pm.Ephemeral)
+	if oneTimePreKeyPrivateKey != nil {
+		diffieHellman4, derr := crypto.DH(*oneTimePreKeyPrivateKey, preKeyMessage.EphemeralKey)
 		if derr != nil {
 			return nil, derr
 		}
-		root, err = deriveRootFromShared(dh1, dh2, dh3, dh4)
+		root, err = deriveRootFromShared(diffieHellman1, diffieHellman2, diffieHellman3, diffieHellman4)
 	} else {
-		root, err = deriveRootFromShared(dh1, dh2, dh3)
+		root, err = deriveRootFromShared(diffieHellman1, diffieHellman2, diffieHellman3)
 	}
 	return root, err
 }
 
 // --- Helpers ---
 
-// verifySPK checks that bundle.SignedPrekey was signed by bundle.SignKey.
-func verifySPK(b domain.PrekeyBundle) bool {
+// verifySignedPreKey checks that the signed pre-key was signed by the advertised signing key.
+func verifySignedPreKey(bundle domain.PreKeyBundle) bool {
 	return crypto.VerifyEd25519(
-		b.SignKey,
-		b.SignedPrekey[:],
-		b.SignedPrekeySig,
+		bundle.SigningKey,
+		bundle.SignedPreKey[:],
+		bundle.SignedPreKeySignature,
 	)
 }
 
 // deriveRootFromShared concatenates the DH outputs and runs HKDF to produce a 32-byte root key.
 // Uses x3dhLabel internally.
 func deriveRootFromShared(dhs ...[32]byte) ([]byte, error) {
-	transcript := make([]byte, 0, len(dhs)*32)
+	transcriptBuf := make([]byte, len(dhs)*32)
+	defer crypto.DeferWipe(&transcriptBuf)()
+	transcript := transcriptBuf[:0] // zero-length slice backed by the allocated buffer
 	for _, dh := range dhs {
 		transcript = append(transcript, dh[:]...)
 	}
@@ -125,6 +128,5 @@ func deriveRootFromShared(dhs ...[32]byte) ([]byte, error) {
 		return nil, err
 	}
 
-	crypto.Wipe(transcript)
 	return root, nil
 }

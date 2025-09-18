@@ -63,15 +63,15 @@ const ctxKeyReqID ctxKey = "reqid"
 // state holds registered prekey bundles and per-user message queues.
 type state struct {
 	mu      sync.RWMutex
-	bundles map[string]domain.PrekeyBundle
-	queues  map[string][]domain.Envelope
+	bundles map[domain.Username]domain.PreKeyBundle
+	queues  map[domain.Username][]domain.Envelope
 }
 
 // newState initialises an empty relay state.
 func newState() *state {
 	return &state{
-		bundles: make(map[string]domain.PrekeyBundle),
-		queues:  make(map[string][]domain.Envelope),
+		bundles: make(map[domain.Username]domain.PreKeyBundle),
+		queues:  make(map[domain.Username][]domain.Envelope),
 	}
 }
 
@@ -270,7 +270,7 @@ func (s *state) handleRegister(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 
-	var bundle domain.PrekeyBundle
+	var bundle domain.PreKeyBundle
 	if err := dec.Decode(&bundle); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad request")
 		return
@@ -279,7 +279,7 @@ func (s *state) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "username required")
 		return
 	}
-	if len(bundle.OneTime) > maxOneTimeKeys {
+	if len(bundle.OneTimePreKeys) > maxOneTimeKeys {
 		writeErr(w, http.StatusRequestEntityTooLarge, "too many one-time keys")
 		return
 	}
@@ -290,11 +290,11 @@ func (s *state) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	if enableLogging {
 		slog.Info("register",
-			"user", bundle.Username,
+			"user", bundle.Username.String(),
 			"identity_key_set", !isZero32(bundle.IdentityKey[:]),
-			"sign_key_set", !isZero32(bundle.SignKey[:]),
-			"spk_id", bundle.SPKID,
-			"one_time_count", len(bundle.OneTime),
+			"signing_key_set", !isZero32(bundle.SigningKey[:]),
+			"spk_id", bundle.SignedPreKeyID,
+			"one_time_count", len(bundle.OneTimePreKeys),
 			"reqid", requestIDFromCtx(r.Context()),
 		)
 	}
@@ -303,14 +303,14 @@ func (s *state) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 // handleGet returns a stored PrekeyBundle (GET /prekey/{username}).
 func (s *state) handleGet(w http.ResponseWriter, r *http.Request) {
-	username := r.PathValue("username")
-	if username == "" {
+	usernameValue := domain.Username(r.PathValue("username"))
+	if usernameValue == "" {
 		writeErr(w, http.StatusBadRequest, "username required")
 		return
 	}
 
 	s.mu.RLock()
-	bundle, ok := s.bundles[username]
+	bundle, ok := s.bundles[usernameValue]
 	s.mu.RUnlock()
 	if !ok {
 		http.NotFound(w, r)
@@ -320,9 +320,9 @@ func (s *state) handleGet(w http.ResponseWriter, r *http.Request) {
 	if enableLogging {
 		slog.Info(
 			"prekey_fetch",
-			"user", username,
-			"spk_id", bundle.SPKID,
-			"one_time_count", len(bundle.OneTime),
+			"user", usernameValue.String(),
+			"spk_id", bundle.SignedPreKeyID,
+			"one_time_count", len(bundle.OneTimePreKeys),
 			"reqid", requestIDFromCtx(r.Context()),
 		)
 	}
@@ -334,7 +334,7 @@ func (s *state) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 
-	user := r.PathValue("user")
+	usernameValue := domain.Username(r.PathValue("user"))
 
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -349,7 +349,7 @@ func (s *state) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Prevent route and payload mismatch.
-	if user == "" || user != env.To {
+	if usernameValue == "" || usernameValue != env.To {
 		writeErr(w, http.StatusBadRequest, "recipient mismatch")
 		return
 	}
@@ -371,22 +371,22 @@ func (s *state) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 
 	// Append with per-user queue cap, drop oldest if needed.
 	s.mu.Lock()
-	q := append(s.queues[user], env)
-	if len(q) > maxPerUserQueue {
-		q = q[len(q)-maxPerUserQueue:]
+	queue := append(s.queues[usernameValue], env)
+	if len(queue) > maxPerUserQueue {
+		queue = queue[len(queue)-maxPerUserQueue:]
 	}
-	s.queues[user] = q
-	qLen := len(q)
+	s.queues[usernameValue] = queue
+	queueLength := len(queue)
 	s.mu.Unlock()
 
 	if enableLogging {
 		slog.Info("enqueue",
-			"queue_user", user,
-			"from", env.From,
-			"to", env.To,
+			"queue_user", usernameValue.String(),
+			"from", env.From.String(),
+			"to", env.To.String(),
 			"cipher_bytes", len(env.Cipher),
-			"has_prekey", env.Prekey != nil,
-			"queue_len", qLen,
+			"has_prekey", env.PreKey != nil,
+			"queue_len", queueLength,
 			"reqid", requestIDFromCtx(r.Context()),
 		)
 	}
@@ -395,7 +395,7 @@ func (s *state) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 
 // handleFetch fetches queued Envelopes (GET /msg/{user}?limit=N).
 func (s *state) handleFetch(w http.ResponseWriter, r *http.Request) {
-	user := r.PathValue("user")
+	usernameValue := domain.Username(r.PathValue("user"))
 
 	limit, err := parseLimit(r.URL.Query().Get("limit"))
 	if err != nil {
@@ -405,7 +405,7 @@ func (s *state) handleFetch(w http.ResponseWriter, r *http.Request) {
 
 	// Copy under lock to avoid races with concurrent enqueue/ack.
 	s.mu.RLock()
-	queue := s.queues[user]
+	queue := s.queues[usernameValue]
 	if limit == 0 || limit > len(queue) {
 		limit = len(queue)
 	}
@@ -417,7 +417,13 @@ func (s *state) handleFetch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 
 	if enableLogging {
-		slog.Info("fetch", "user", user, "limit", limit, "available", available, "reqid", requestIDFromCtx(r.Context()))
+		slog.Info(
+			"fetch",
+			"user", usernameValue.String(),
+			"limit", limit,
+			"available", available,
+			"reqid", requestIDFromCtx(r.Context()),
+		)
 	}
 }
 
@@ -426,7 +432,7 @@ func (s *state) handleAck(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 
-	user := r.PathValue("user")
+	usernameValue := domain.Username(r.PathValue("user"))
 
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -440,15 +446,21 @@ func (s *state) handleAck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	if ack.Count > len(s.queues[user]) {
-		ack.Count = len(s.queues[user])
+	if ack.Count > len(s.queues[usernameValue]) {
+		ack.Count = len(s.queues[usernameValue])
 	}
-	s.queues[user] = s.queues[user][ack.Count:]
-	remaining := len(s.queues[user])
+	s.queues[usernameValue] = s.queues[usernameValue][ack.Count:]
+	remaining := len(s.queues[usernameValue])
 	s.mu.Unlock()
 
 	if enableLogging {
-		slog.Info("ack", "user", user, "drop", ack.Count, "remaining", remaining, "reqid", requestIDFromCtx(r.Context()))
+		slog.Info(
+			"ack",
+			"user", usernameValue.String(),
+			"drop", ack.Count,
+			"remaining", remaining,
+			"reqid", requestIDFromCtx(r.Context()),
+		)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -474,11 +486,26 @@ func main() {
 	mux := http.NewServeMux()
 
 	// Register HTTP endpoints. Middlewares: recover -> reqid -> logging -> handler
-	mux.HandleFunc("POST /register", chain(s.handleRegister, withRecover, withReqID, withLogging))    // POST /register
-	mux.HandleFunc("GET /prekey/{username}", chain(s.handleGet, withRecover, withReqID, withLogging)) // GET  /prekey/{username}
-	mux.HandleFunc("POST /msg/{user}", chain(s.handleEnqueue, withRecover, withReqID, withLogging))   // POST /msg/{user}
-	mux.HandleFunc("GET /msg/{user}", chain(s.handleFetch, withRecover, withReqID, withLogging))      // GET  /msg/{user}
-	mux.HandleFunc("POST /msg/{user}/ack", chain(s.handleAck, withRecover, withReqID, withLogging))   // POST /msg/{user}/ack
+	mux.HandleFunc(
+		"POST /register",
+		chain(s.handleRegister, withRecover, withReqID, withLogging),
+	) // POST /register
+	mux.HandleFunc(
+		"GET /prekey/{username}",
+		chain(s.handleGet, withRecover, withReqID, withLogging),
+	) // GET  /prekey/{username}
+	mux.HandleFunc(
+		"POST /msg/{user}",
+		chain(s.handleEnqueue, withRecover, withReqID, withLogging),
+	) // POST /msg/{user}
+	mux.HandleFunc(
+		"GET /msg/{user}",
+		chain(s.handleFetch, withRecover, withReqID, withLogging),
+	) // GET  /msg/{user}
+	mux.HandleFunc(
+		"POST /msg/{user}/ack",
+		chain(s.handleAck, withRecover, withReqID, withLogging),
+	) // POST /msg/{user}/ack
 
 	// Simple health check for readiness/liveness probes.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

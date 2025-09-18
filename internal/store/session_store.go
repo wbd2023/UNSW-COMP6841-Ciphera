@@ -21,29 +21,29 @@ func NewSessionFileStore(dir string) *SessionFileStore {
 }
 
 // SaveSession writes a session record for peer.
-func (s *SessionFileStore) SaveSession(peer string, sess domain.Session) error {
+func (s *SessionFileStore) SaveSession(peer domain.Username, session domain.Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.dir, sessionsFilename)
-	m := map[string]domain.Session{}
-	_ = readJSON(path, &m)
-	m[peer] = sess
-	return writeJSON(path, m, 0o600)
+	sessions := map[domain.Username]domain.Session{}
+	_ = readJSON(path, &sessions)
+	sessions[peer] = session
+	return writeJSON(path, sessions, 0o600)
 }
 
 // LoadSession retrieves a stored session for peer.
-func (s *SessionFileStore) LoadSession(peer string) (domain.Session, bool, error) {
+func (s *SessionFileStore) LoadSession(peer domain.Username) (domain.Session, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.dir, sessionsFilename)
-	m := map[string]domain.Session{}
-	if err := readJSON(path, &m); err != nil {
+	sessions := map[domain.Username]domain.Session{}
+	if err := readJSON(path, &sessions); err != nil {
 		return domain.Session{}, false, err
 	}
-	sess, ok := m[peer]
-	return sess, ok, nil
+	session, ok := sessions[peer]
+	return session, ok, nil
 }
 
 // Compile-time assertion that SessionFileStore implements domain.SessionStore.

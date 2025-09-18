@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"ciphera/internal/domain"
 )
 
 // recvCmd fetches any queued ciphertexts, decrypts them, and prints them.
@@ -17,7 +19,7 @@ func recvCmd() *cobra.Command {
 			msgs, err := appCtx.MessageService.ReceiveMessage(
 				cmd.Context(),
 				passphrase,
-				username,
+				domain.Username(username),
 				0,
 			)
 			if err != nil {
